@@ -1,0 +1,13 @@
+{
+  "mode": "generative",
+  "id": "fix-1",
+  "type": "FixCard",
+  "props": {
+    "targetCase": "case-login-001",
+    "fixType": "auto_fix",
+    "before": "await page.click('.login-btn');",
+    "after": "await page.click('[data-testid=login-btn]');",
+    "reason": "选择器 '.login-btn' 已过时，框架升级后按钮改为 data-testid 方式定位",
+    "retryCount": 1
+  }
+}

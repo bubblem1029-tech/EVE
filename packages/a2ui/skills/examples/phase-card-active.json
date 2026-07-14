@@ -1,0 +1,11 @@
+{
+  "mode": "generative",
+  "id": "step1",
+  "type": "PhaseCard",
+  "props": {
+    "step": 1,
+    "stepName": "初始化",
+    "status": "active",
+    "detail": "正在克隆代码仓库 xxx.git..."
+  }
+}

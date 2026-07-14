@@ -1,0 +1,12 @@
+{
+  "mode": "generative",
+  "id": "step1",
+  "type": "PhaseCard",
+  "props": {
+    "step": 1,
+    "stepName": "初始化",
+    "status": "completed",
+    "duration": "3.2s",
+    "detail": "代码仓库已克隆，PRD 文档已获取"
+  }
+}

@@ -1,0 +1,284 @@
+{
+  "$schema": "https://a2ui.org/catalog/v0.9",
+  "name": "keve-test-agent",
+  "description": "EVE 测试平台 AI 助手组件目录，用于生成测试管线进度卡片和交互组件",
+  "components": {
+    "PhaseCard": {
+      "description": "管线单步进度卡片，展示某个 Step 的状态和详情",
+      "when": "管线某一步开始、进行中或完成时推送",
+      "props": {
+        "type": "object",
+        "required": ["step", "stepName", "status"],
+        "properties": {
+          "step": {
+            "type": "number",
+            "enum": [1, 2, 3, 4, 5, 6, 7],
+            "description": "步骤序号"
+          },
+          "stepName": {
+            "type": "string",
+            "enum": ["初始化", "上下文分析", "用例生成", "脚本生成", "测试执行", "诊断修复", "报告产出"],
+            "description": "步骤中文名"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "active", "completed", "failed", "skipped"],
+            "description": "步骤状态"
+          },
+          "duration": {
+            "type": "string",
+            "description": "完成耗时，如 '15.4s'"
+          },
+          "detail": {
+            "type": "string",
+            "description": "进度详情，如 '正在分析 3 个文件变更...'"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "PipelineOverview": {
+      "description": "7步管线总览，一次性展示全管线状态",
+      "when": "管线启动时、或用户询问整体进度时推送",
+      "props": {
+        "type": "object",
+        "required": ["phases"],
+        "properties": {
+          "phases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["step", "status"],
+              "properties": {
+                "step": { "type": "number", "enum": [1,2,3,4,5,6,7] },
+                "status": { "type": "string", "enum": ["pending","active","completed","failed","skipped"] },
+                "duration": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "description": "7步管线状态数组"
+          },
+          "planId": {
+            "type": "string",
+            "description": "关联的测试计划 ID"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "CaseListCard": {
+      "description": "测试用例清单卡片，展示生成的用例列表",
+      "when": "用例生成完成后推送",
+      "props": {
+        "type": "object",
+        "required": ["total", "cases"],
+        "properties": {
+          "total": {
+            "type": "number",
+            "description": "用例总数"
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "module"],
+              "properties": {
+                "id": { "type": "string", "description": "用例 ID" },
+                "name": { "type": "string", "description": "用例名称" },
+                "module": { "type": "string", "description": "所属模块" },
+                "scenario": { "type": "string", "description": "所属场景" }
+              },
+              "additionalProperties": false
+            },
+            "description": "用例列表"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "ScriptCard": {
+      "description": "脚本文件预览卡片，展示生成的脚本文件列表",
+      "when": "脚本生成完成、或修复后重新生成时推送",
+      "props": {
+        "type": "object",
+        "required": ["files"],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "path"],
+              "properties": {
+                "name": { "type": "string", "description": "文件名" },
+                "path": { "type": "string", "description": "文件路径" },
+                "lines": { "type": "number", "description": "代码行数" }
+              },
+              "additionalProperties": false
+            },
+            "description": "脚本文件列表"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "ScreenshotCard": {
+      "description": "截图卡片，展示测试失败截图",
+      "when": "测试失败需展示截图时推送",
+      "props": {
+        "type": "object",
+        "required": ["screenshots"],
+        "properties": {
+          "screenshots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["caseId", "url"],
+              "properties": {
+                "caseId": { "type": "string", "description": "关联用例 ID" },
+                "caseName": { "type": "string", "description": "用例名称" },
+                "url": { "type": "string", "description": "截图 URL" },
+                "traceUrl": { "type": "string", "description": "Trace URL" }
+              },
+              "additionalProperties": false
+            },
+            "description": "截图列表"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "DiagnosisCard": {
+      "description": "诊断结果卡片，展示失败用例的分类诊断和建议",
+      "when": "测试执行后有失败用例，诊断完成后推送",
+      "props": {
+        "type": "object",
+        "required": ["errorCategory", "failedCases", "fixable"],
+        "properties": {
+          "errorCategory": {
+            "type": "string",
+            "enum": ["A_framework", "B_business", "C_data", "D_environment"],
+            "description": "错误分类：A框架/B业务/C数据/D环境"
+          },
+          "failedCases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["caseId", "caseName", "errorMessage"],
+              "properties": {
+                "caseId": { "type": "string" },
+                "caseName": { "type": "string" },
+                "errorMessage": { "type": "string" },
+                "suggestion": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "description": "失败用例列表"
+          },
+          "fixable": {
+            "type": "boolean",
+            "description": "是否可自动修复"
+          },
+          "summary": {
+            "type": "string",
+            "description": "诊断摘要"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "FixCard": {
+      "description": "修复方案卡片，展示 AI 的修复动作和代码变更",
+      "when": "诊断后执行修复时推送",
+      "props": {
+        "type": "object",
+        "required": ["targetCase", "fixType", "reason"],
+        "properties": {
+          "targetCase": {
+            "type": "string",
+            "description": "修复目标用例 ID 或名称"
+          },
+          "fixType": {
+            "type": "string",
+            "enum": ["auto_fix", "suggestion", "skip"],
+            "description": "修复类型：自动修复/建议/跳过"
+          },
+          "before": {
+            "type": "string",
+            "description": "修复前代码片段"
+          },
+          "after": {
+            "type": "string",
+            "description": "修复后代码片段"
+          },
+          "reason": {
+            "type": "string",
+            "description": "修复原因"
+          },
+          "retryCount": {
+            "type": "number",
+            "description": "当前重试次数"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "QuickActions": {
+      "description": "快捷操作按钮组，提供常用操作入口",
+      "when": "对话需要用户快速操作时推送",
+      "props": {
+        "type": "object",
+        "required": ["actions"],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["label", "action"],
+              "properties": {
+                "label": { "type": "string", "description": "按钮文字" },
+                "action": { "type": "string", "description": "操作标识" },
+                "icon": { "type": "string", "description": "图标 emoji" },
+                "variant": { "type": "string", "enum": ["primary", "default", "danger"], "description": "按钮样式" }
+              },
+              "additionalProperties": false
+            },
+            "description": "操作按钮列表"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "ConfirmCard": {
+      "description": "确认操作卡片，需要用户确认后才能继续执行",
+      "when": "修复方案需要人工确认时推送",
+      "props": {
+        "type": "object",
+        "required": ["title", "description"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "确认标题"
+          },
+          "description": {
+            "type": "string",
+            "description": "确认描述"
+          },
+          "confirmLabel": {
+            "type": "string",
+            "description": "确认按钮文字，默认 '确认'"
+          },
+          "cancelLabel": {
+            "type": "string",
+            "description": "取消按钮文字，默认 '取消'"
+          },
+          "riskLevel": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "风险等级"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

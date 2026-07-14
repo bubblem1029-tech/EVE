@@ -1,0 +1,135 @@
+{
+  "$schema": "https://a2ui.org/templates/v0.9",
+  "name": "keve-test-templates",
+  "description": "EVE 测试平台报告模板目录，Agent 选择模板 ID 并填充变量，前端用固定布局渲染",
+  "templates": {
+    "e2e-report": {
+      "description": "E2E 测试报告，包含用例汇总、诊断、覆盖率、截图、详情",
+      "layout": [
+        { "slot": "header", "component": "ReportHeader" },
+        { "slot": "summary", "component": "CaseSummaryTable" },
+        { "slot": "diagnosis", "component": "DiagnosisPanel" },
+        { "slot": "coverage", "component": "CoverageChart" },
+        { "slot": "details", "component": "CaseDetailList" },
+        { "slot": "screenshots", "component": "ScreenshotGallery" }
+      ],
+      "requiredVars": {
+        "projectName": { "type": "string", "description": "项目名称" },
+        "planName": { "type": "string", "description": "测试计划名称" },
+        "planId": { "type": "string", "description": "计划 ID" },
+        "passRate": { "type": "number", "description": "通过率 0-100" },
+        "totalCases": { "type": "number", "description": "总用例数" },
+        "passedCases": { "type": "number", "description": "通过数" },
+        "failedCases": { "type": "number", "description": "失败数" },
+        "skippedCases": { "type": "number", "description": "跳过数" },
+        "duration": { "type": "string", "description": "总耗时" }
+      },
+      "optionalVars": {
+        "cases": {
+          "type": "array",
+          "description": "用例详情列表",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "module": { "type": "string" },
+              "scenario": { "type": "string" },
+              "status": { "type": "string", "enum": ["pass", "fail", "skip"] },
+              "duration": { "type": "string" },
+              "errorMessage": { "type": "string" },
+              "screenshotUrl": { "type": "string" },
+              "traceUrl": { "type": "string" }
+            }
+          }
+        },
+        "diagnoses": {
+          "type": "array",
+          "description": "诊断结果列表",
+          "items": {
+            "type": "object",
+            "properties": {
+              "errorCategory": { "type": "string" },
+              "cases": { "type": "array" },
+              "suggestion": { "type": "string" }
+            }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "description": "覆盖率数据",
+          "properties": {
+            "e2e": { "type": "number" },
+            "unit": { "type": "number" },
+            "modules": { "type": "array" }
+          }
+        },
+        "artifacts": {
+          "type": "object",
+          "description": "产物链接",
+          "properties": {
+            "reportHtml": { "type": "string" },
+            "executionResultsJson": { "type": "string" },
+            "diagnosisReportYaml": { "type": "string" }
+          }
+        }
+      }
+    },
+    "unit-report": {
+      "description": "单元测试报告，包含套件汇总和覆盖率",
+      "layout": [
+        { "slot": "header", "component": "ReportHeader" },
+        { "slot": "suites", "component": "SuiteSummaryTable" },
+        { "slot": "diagnosis", "component": "DiagnosisPanel" },
+        { "slot": "coverage", "component": "CoverageChart" },
+        { "slot": "details", "component": "SuiteDetailList" }
+      ],
+      "requiredVars": {
+        "projectName": { "type": "string" },
+        "planName": { "type": "string" },
+        "planId": { "type": "string" },
+        "passRate": { "type": "number" },
+        "totalSuites": { "type": "number" },
+        "passedSuites": { "type": "number" },
+        "failedSuites": { "type": "number" },
+        "duration": { "type": "string" }
+      },
+      "optionalVars": {
+        "suites": {
+          "type": "array",
+          "description": "测试套件详情",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "file": { "type": "string" },
+              "passed": { "type": "number" },
+              "failed": { "type": "number" },
+              "duration": { "type": "string" },
+              "errorMessages": { "type": "array" }
+            }
+          }
+        },
+        "diagnoses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "errorCategory": { "type": "string" },
+              "cases": { "type": "array" },
+              "suggestion": { "type": "string" }
+            }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "line": { "type": "number" },
+            "branch": { "type": "number" },
+            "function": { "type": "number" }
+          }
+        }
+      }
+    }
+  }
+}

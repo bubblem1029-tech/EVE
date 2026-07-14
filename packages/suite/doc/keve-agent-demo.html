@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KEVE Agent - AI 重建测试流程</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --dev:#4F46E5;--dev-l:#818CF8;--dev-bg:#EEF2FF;
+    --test:#059669;--test-l:#34D399;--test-bg:#ECFDF5;
+    --plat:#7C3AED;--plat-l:#A78BFA;--plat-bg:#F5F3FF;
+    --warn:#D97706;--warn-bg:#FEF3C7;
+    --in:#0369A1;--in-bg:#E0F2FE;
+    --g50:#F9FAFB;--g100:#F3F4F6;--g200:#E5E7EB;--g300:#D1D5DB;
+    --g400:#9CA3AF;--g500:#6B7280;--g600:#4B5563;--g700:#374151;
+    --g800:#1F2937;--g900:#111827;
+    --mono:'SF Mono','Fira Code','Cascadia Code',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  body{font-family:var(--sans);height:100vh;overflow:hidden;background:var(--g50);display:flex;flex-direction:column}
+
+  /* HEADER */
+  .Hd{padding:14px 30px 0;display:flex;align-items:center;gap:16px}
+  .Hd-ico{width:36px;height:36px;background:var(--dev);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:white}
+  .Hd-t{font-size:20px;font-weight:800;color:var(--g800)}
+  .Hd-s{font-size:12px;color:var(--g500)}
+
+  /* TOP: Flow */
+  .Top{padding:8px 30px 0;display:flex;align-items:flex-start;gap:0}
+  .Tph{flex:1;background:white;border-radius:12px;padding:12px 14px;border:1.5px solid var(--g200);min-width:0;transition:all .3s}
+  .Tph.d{border-color:var(--dev-l)}.Tph.t{border-color:var(--test-l)}.Tph.o{border-color:var(--plat-l)}
+  .Tph.act.d{border-color:var(--dev);background:var(--dev-bg)}
+  .Tph.act.t{border-color:var(--test);background:var(--test-bg)}
+  .Tph.act.o{border-color:var(--plat);background:var(--plat-bg)}
+  .Tph-hd{font-size:12px;font-weight:700}
+  .Tph.d .Tph-hd{color:var(--dev)}.Tph.t .Tph-hd{color:var(--test)}.Tph.o .Tph-hd{color:var(--plat)}
+  .Tph-sub{font-size:10px;color:var(--g500);margin-top:2px;line-height:1.3}
+  .Tph-nds{display:flex;gap:6px;margin-top:8px;justify-content:center}
+  .Tnd{background:var(--g50);border-radius:7px;padding:7px 10px;cursor:pointer;transition:all .3s;border:1.5px solid var(--g200);min-width:70px;text-align:center;flex:1}
+  .Tnd.d{border-color:rgba(79,70,229,.25)}.Tnd.t{border-color:rgba(5,150,105,.25)}.Tnd.o{border-color:rgba(124,58,237,.25)}
+  .Tnd.act{transform:scale(1.05)}
+  .Tnd.act.d{border-color:var(--dev);background:var(--dev-bg)}
+  .Tnd.act.t{border-color:var(--test);background:var(--test-bg)}
+  .Tnd.act.o{border-color:var(--plat);background:var(--plat-bg)}
+  .Tnd.done{opacity:.35}
+  .Tnd .cmd{font-size:9px;font-weight:700;font-family:var(--mono)}
+  .Tnd.d .cmd{color:var(--dev)}.Tnd.t .cmd{color:var(--test)}.Tnd.o .cmd{color:var(--plat)}
+  .Tnd .nm{font-size:10px;font-weight:600;color:var(--g700);margin-top:1px}
+
+  .Tarr{width:30px;display:flex;align-items:center;justify-content:center;padding-top:36px}
+  .Tarr svg{width:30px;height:18px}
+
+  /* Timeline */
+  .Tl{display:flex;gap:0;overflow-x:auto;padding:6px 30px 0;border-bottom:1px solid var(--g200)}
+  .Tl::-webkit-scrollbar{height:2px}.Tl::-webkit-scrollbar-thumb{background:var(--g300);border-radius:2px}
+  .Tl-i{flex-shrink:0;padding:6px 8px;font-size:10px;color:var(--g500);cursor:pointer;transition:all .2s;border-bottom:2px solid transparent;white-space:nowrap}
+  .Tl-i:hover{background:var(--g100)}
+  .Tl-i.act{color:var(--g800);font-weight:600}
+  .Tl-i.act.d{border-bottom-color:var(--dev)}.Tl-i.act.t{border-bottom-color:var(--test)}.Tl-i.act.o{border-bottom-color:var(--plat)}
+  .Tl-i.done{color:var(--g400)}
+  .Tl-sep{flex-shrink:0;width:1px;background:var(--g200);margin:3px 1px}
+
+  /* MIDDLE: Demo */
+  .Mid{flex:1;overflow-y:auto;padding:12px 30px 0}
+  .Mid::-webkit-scrollbar{width:4px}.Mid::-webkit-scrollbar-thumb{background:var(--g300);border-radius:2px}
+
+  /* Controls */
+  .Mc{display:flex;align-items:center;gap:8px;padding:0 0 10px}
+  .Mbtn{background:var(--dev);color:white;border:none;padding:7px 14px;border-radius:6px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:5px;font-family:var(--sans);transition:all .2s}
+  .Mbtn:hover{filter:brightness(1.15)}.Mbtn.on{background:var(--warn)}
+  .Msel{background:var(--g100);color:var(--g600);border:1px solid var(--g200);padding:4px 8px;border-radius:4px;font-size:11px;cursor:pointer;font-family:var(--sans)}
+  .Mlbl{font-size:11px;color:var(--g500);margin-left:auto}.Mlbl b{color:var(--g700)}
+  .Msc{font-size:11px;padding:5px 10px;background:var(--dev-bg);border-radius:6px;color:var(--g500)}.Msc b{color:var(--dev)}
+
+  /* Step card */
+  .Scard{background:white;border-radius:10px;border:1.5px solid var(--g200);padding:18px 20px;display:none;margin-bottom:12px}
+  .Scard.act{display:block}
+  .Scard.d{border-left:3px solid var(--dev)}.Scard.t{border-left:3px solid var(--test)}.Scard.o{border-left:3px solid var(--plat)}
+
+  .Sc-hd{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .Sc-ph{font-size:10px;font-weight:700;padding:4px 10px;border-radius:6px;letter-spacing:.04em}
+  .Sc-ph.d{background:var(--dev-bg);color:var(--dev)}.Sc-ph.t{background:var(--test-bg);color:var(--test)}.Sc-ph.o{background:var(--plat-bg);color:var(--plat)}
+  .Sc-nm{font-size:16px;font-weight:700;color:var(--g800)}
+  .Sc-tm{font-size:11px;color:var(--g400);font-family:var(--mono);margin-left:auto}
+
+  /* Input / Output sections */
+  .Sc-io{display:flex;gap:16px;margin-bottom:12px}
+  .Sc-in,.Sc-out{flex:1;padding:12px 14px;border-radius:8px}
+  .Sc-in{background:var(--in-bg);border:1px solid rgba(3,105,161,.1)}
+  .Sc-out{background:var(--warn-bg);border:1px solid rgba(217,119,6,.1)}
+  .Sc-io-l{font-size:10px;font-weight:700;letter-spacing:.06em;margin-bottom:6px;display:flex;align-items:center;gap:4px}
+  .Sc-in .Sc-io-l{color:var(--in)}.Sc-out .Sc-io-l{color:var(--warn)}
+  .Sc-io-l .arrow{font-size:12px}
+  .Sc-io-v{font-size:12px;color:var(--g600);line-height:1.5}
+  .Sc-io-v b{color:var(--g800);font-weight:600}
+  .Sc-io-v code{font-family:var(--mono);font-size:11px;background:rgba(0,0,0,.04);padding:1px 4px;border-radius:3px}
+
+  /* AI thinking */
+  .Sc-think{padding:12px 14px;border-radius:8px;margin-bottom:10px;border:1px solid var(--g200)}
+  .Sc-think.d{background:rgba(79,70,229,.03);border-color:rgba(79,70,229,.1)}
+  .Sc-think.t{background:rgba(5,150,105,.03);border-color:rgba(5,150,105,.1)}
+  .Sc-think.o{background:rgba(124,58,237,.03);border-color:rgba(124,58,237,.1)}
+  .Sc-thk-l{font-size:10px;font-weight:700;letter-spacing:.06em;margin-bottom:4px;color:var(--g500)}
+
+  /* Keys */
+  .Sc-keys{display:flex;gap:6px;flex-wrap:wrap}
+  .Sc-k{font-size:10px;padding:4px 10px;border-radius:5px;font-weight:500}
+  .Sc-k.d{background:var(--dev-bg);color:var(--dev)}
+  .Sc-k.t{background:var(--test-bg);color:var(--test)}
+  .Sc-k.o{background:var(--plat-bg);color:var(--plat)}
+
+  /* BOTTOM */
+  .Btm{padding:10px 30px 14px}
+  .Btm-bar{background:var(--g800);border-radius:10px;padding:10px 18px;display:flex;align-items:center;gap:14px}
+  .Btm-lbl{font-size:12px;font-weight:700;color:white;white-space:nowrap}
+  .Btm-items{display:flex;gap:8px;flex-wrap:wrap;flex:1}
+  .Btm-item{font-size:10px;padding:4px 10px;border-radius:5px;background:rgba(255,255,255,.08);color:var(--g300);display:flex;align-items:center;gap:5px}
+  .Btm-item b{color:white;font-weight:600}
+  .Btm-tag{font-size:8px;padding:2px 6px;border-radius:3px;color:white;font-weight:600}
+
+  /* Glow */
+  @keyframes gd{0%,100%{box-shadow:0 0 10px rgba(79,70,229,.12)}50%{box-shadow:0 0 18px rgba(79,70,229,.25)}}
+  @keyframes gt{0%,100%{box-shadow:0 0 10px rgba(5,150,105,.12)}50%{box-shadow:0 0 18px rgba(5,150,105,.25)}}
+  @keyframes gp{0%,100%{box-shadow:0 0 10px rgba(124,58,237,.12)}50%{box-shadow:0 0 18px rgba(124,58,237,.25)}}
+  .Tnd.act.d{animation:gd 1.4s ease-in-out infinite}
+  .Tnd.act.t{animation:gt 1.4s ease-in-out infinite}
+  .Tnd.act.o{animation:gp 1.4s ease-in-out infinite}
+</style>
+</head>
+<body>
+
+<div class="Hd">
+  <div class="Hd-ico">K</div>
+  <div><div class="Hd-t">KEVE Agent · AI 重建测试流程</div><div class="Hd-s">开发·自测 → 测试·协同 → 运维·持续保障</div></div>
+</div>
+
+<div class="Top">
+  <div class="Tph d" id="ph-d">
+    <div class="Tph-hd">开发阶段 · AI自测闭环</div>
+    <div class="Tph-sub">提交代码自动触发 · 沉淀项目资产(agent维护)</div>
+    <div class="Tph-nds">
+      <div class="Tnd d" id="n1" onclick="go(1)">
+        <div class="cmd">提交→test</div>
+        <div class="nm">AI自测闭环</div>
+      </div>
+      <div class="Tnd d" id="n2" onclick="go(7)">
+        <div class="cmd">report</div>
+        <div class="nm">同步平台</div>
+      </div>
+    </div>
+  </div>
+  <div class="Tarr"><svg viewBox="0 0 30 18"><path d="M4 9 L26 9 M20 3 L26 9 L20 15" stroke="#D1D5DB" stroke-width="2" fill="none"/></svg></div>
+  <div class="Tph t" id="ph-t">
+    <div class="Tph-hd">测试阶段 · 人机协同确认</div>
+    <div class="Tph-sub">提测触发 → 平台分发 → 参考开发资产二次测试</div>
+    <div class="Tph-nds">
+      <div class="Tnd t" id="n3" onclick="go(8)">
+        <div class="cmd">提测触发</div>
+        <div class="nm">分发+通知</div>
+      </div>
+      <div class="Tnd t" id="n4" onclick="go(10)">
+        <div class="cmd">run(桌面)</div>
+        <div class="nm">可视化协同</div>
+      </div>
+    </div>
+  </div>
+  <div class="Tarr"><svg viewBox="0 0 30 18"><path d="M4 9 L26 9 M20 3 L26 9 L20 15" stroke="#D1D5DB" stroke-width="2" fill="none"/></svg></div>
+  <div class="Tph o" id="ph-o">
+    <div class="Tph-hd">运维阶段 · 持续保障</div>
+    <div class="Tph-sub">可执行脚本+自然语言用例沉淀 · 定时巡检</div>
+    <div class="Tph-nds">
+      <div class="Tnd o" id="n5" onclick="go(11)">
+        <div class="cmd">keve平台</div>
+        <div class="nm">脚本沉淀</div>
+      </div>
+      <div class="Tnd o" id="n6" onclick="go(12)">
+        <div class="cmd">keve平台</div>
+        <div class="nm">定时巡检</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="Tl" id="tlEl"></div>
+
+<div class="Mid">
+  <div class="Mc">
+    <button class="Mbtn" id="Mbtn" onclick="tp()"><span id="Mi">&#9654;</span><span id="Mt">播放</span></button>
+    <select class="Msel" id="Ms" onchange="cs()"><option value="2000">慢 2s</option><option value="1200" selected>中 1.2s</option><option value="600">快 0.6s</option></select>
+    <div class="Mlbl">步骤 <b id="Mn">1</b>/10</div>
+    <div class="Msc">MR <b>868</b></div>
+  </div>
+  <div id="cards"></div>
+</div>
+
+<div class="Btm">
+  <div class="Btm-bar">
+    <div class="Btm-lbl">keve 平台底座</div>
+    <div class="Btm-items">
+      <div class="Btm-item"><span class="Btm-tag" style="background:var(--dev)">CLI</span><b>keve</b> init / test / run / report</div>
+      <div class="Btm-item"><span class="Btm-tag" style="background:var(--test)">桌面端</span><b>keve</b> 可视化协同</div>
+      <div class="Btm-item"><span class="Btm-tag" style="background:var(--plat)">Web</span><b>keve</b> 资产沉淀 + 巡检调度</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const S=[
+  {ph:'d',nm:'环境初始化(每项目一次)',tm:'一次性',
+   in:'<code>项目仓库</code>(llm-agent) → <b>keve init --force</b>',
+   out:'<code>.keve/</code> 工作区<br><code>keve_test_spec/poms/</code>(7个Page Object)<br><code>keve_test_spec/fixtures/test-data.ts</code><br><code>keve.yaml</code> + <code>playwright.config.ts</code><br><b>3 Skills</b> + <b>1 Agent</b>',
+   th:'keve init只需在每个项目中执行一次。创建工作区、注入Skills和Agent、生成配置。后续每次提交代码不再重复初始化。',
+   ks:['keve init','每项目一次','3 Skills','1 Agent']},
+  {ph:'d',nm:'AI分析(需求+代码+知识库)',tm:'~5min',
+   in:'<b>PRD</b>: xxx/d/home/fcAB5rrt...<br><b>MR 868 代码变更</b> + <b>项目源码</b>',
+   out:'<b>case-generation skill</b> → <code>test-cases.yaml</code> 版本1.0<br>5模块: <b>AG</b>(遮罩层,8用例) <b>KB</b>(禁用筛选,4用例) <b>WW</b>(字符限制,5用例) <b>SK</b>(锁定权限,6用例) <b>RG</b>(回归,2用例)<br><b style="color:var(--warn)">需求偏差2处</b>: 欢迎语300≠PRD200 / 去掉"可在DataAgent中@"<br><br><b>script-generation skill</b> → <code>poms/AgentDetailPage.ts</code> (5.21KB) / <code>NotAvailablePage.ts</code> (10.36KB) / <code>SkillDetailPage.ts</code> (12.54KB)<br><code>fixtures/test-data.ts</code> → <b>agents.tcPortal.id=636</b><br><b>@keveModel/@keveScene</b> 打标<br><br><b>有疑惑 → 人工check补齐</b>',
+   th:'提交代码时自动触发keve test。两个skill并行工作: case-generation分析PRD+MR生成test-cases.yaml(发现2处需求偏差)；script-generation分析项目源码生成POM+test-data.ts+打标。中间有疑惑信息(如定位器歧义、需求模糊)需要人工check补齐。',
+   ks:['case-generation','script-generation','需求偏差2处','人工check']},
+  {ph:'d',nm:'测试计划设计(可执行脚本)',tm:'~4min',
+   in:'<code>test-cases.yaml</code>(25+用例) + <b>POM类</b>(7个) + <code>test-data.ts</code>(tcPortal.id=636)',
+   out:'__CODE_BLOCK__',
+   th:'基于test-cases.yaml(测试用例)和POM(测试知识)，编写6个Playwright可执行测试计划(spec)。每个spec定义模块、场景、测试目标(步骤和预期)。这就是集成/E2E脚本编写。',
+   ks:['6 spec','@keveGoal','keveAssert','可执行测试计划']},
+  {ph:'d',nm:'执行+评估+修复(loop)',tm:'18轮/4h',
+   in:'<b>可执行测试计划</b>(6 Playwright spec) + <code>playwright.config.ts</code> + <b>3 workers</b> 并行',
+   out:'<b>测试报告</b>: R18 最终结果 24 fail / 48 total<br>keveAssert评估: <b>confidence</b>评分 + <b>4分类根因</b><br>67% visual(B类-遮罩层断言噪声) / 20% script(D类) / 8% assert(C类) / 5% env(A类)<br><b style="color:var(--warn)">关键结论</b>: B类不应进修复循环 → D类进修复循环(loop) → R2:32→R18:24',
+   th:'keve-test-agent编排执行+评估+修复的闭环loop。Round 2执行32 fail→keveAssert智能评估根因→D类(script)进入修复循环→修复spec→重跑→再评估→loop直到通过或达到上限。实际18轮: 67% B类(visual)不应进循环但被混入，导致修复无效。结论: loop应只针对D类。',
+   ks:['keve-test-agent','闭环loop','D类修复','B类跳过']},
+  {ph:'d',nm:'同步平台(测试计划+结果)',tm:'~30s',
+   in:'<code>test-cases.yaml</code>(测试计划) + <b>执行结果</b>(24/48 failed) + <b>MR 868 diff</code>(代码变更) + <b>PRD链接</b>(需求信息)',
+   out:'<b>keve平台任务记录</b>(MR 868)<br><b>项目资产沉淀</b>:<br>POM库(7个Page Object) → agent维护<br>test-data.ts → agent维护<br>test-cases.yaml → agent维护<br>评估基线(confidence历史)',
+   th:'测试计划和执行结果同步到keve平台。项目资产(POM+用例+数据)由agent持续维护更新。同步不阻塞——失败仅warning。',
+   ks:['测试计划','执行结果','代码变更','项目资产']},
+  {ph:'t',nm:'提测触发→平台分发',tm:'~1s',
+   in:'<b>开发标记提测</b>(MR 868 ready for test)',
+   out:'<b>keve平台拉取</b>: 测试计划 + 代码变更 + 需求<br>→ <b>自动分发</b>: 张三(AG+SK模块) / 李四(KB+WW模块)<br>→ <b>桌面推送</b>: "MR 868测试完成, 24个问题"',
+   th:'开发标记提测后，keve平台拉取相关信息(测试计划、代码变更、需求)，自动分发到各测试人员。桌面应用推送通知。',
+   ks:['提测触发','信息拉取','人员分发','桌面推送']},
+  {ph:'t',nm:'桌面应用通知',tm:'~实时',
+   in:'<b>平台分发信息</b>(MR标题+AI概要+根因+报告链接)',
+   out:'<b>桌面推送</b>:<br>MR 868 测试完成<br>24个问题 (67%视觉类)<br>点击查看 → bs3.../report.html',
+   th:'keve桌面应用推送通知到测试同学。',
+   ks:['桌面推送','即时通知','一键查看']},
+  {ph:'t',nm:'可视化查看+二次测试+修正',tm:'~15min',
+   in:'<b>开发资产</b>: POM(AgentDetailPage.ts等) + test-cases.yaml + test-data.ts<br><b>AI测试结果</b>: 截图回放 + confidence + 根因标注(B类67%/D类20%)',
+   out:'<b>确认</b>: B类为系统性缺陷(断言噪声)，非bug<br><b>修正</b>: 遮罩层断言→容忍噪声描述<br><b>补充</b>: 增加WW-06(300字符边界用例)<br><b>筛选</b>: AG核心流程 → 定时巡检',
+   th:'测试同学参考开发资产和AI结果二次测试: 确认B类为系统性缺陷而非bug，修正断言容忍噪声，补充遗漏用例，筛选核心流程交给keve平台巡检。',
+   ks:['参考开发资产','二次测试','修正断言','筛选巡检']},
+  {ph:'o',nm:'沉淀可执行脚本+用例',tm:'持续',
+   in:'<b>开发+测试阶段产出</b>: 6 Playwright spec + test-cases.yaml + 7 POM + 修正断言',
+   out:'<b>keve平台资产库</b>:<br><code>agent-mask.spec.ts</code> (可执行，含修正后的断言)<br><code>test-cases.yaml</code> (自然语言: AG-01 TC类型无权限状态描述简化)<br><code>poms/*.ts</code> (POM库，可复用)<br><b>agent持续维护更新</b>',
+   th:'keve平台沉淀可直接执行的Playwright脚本和自然语言用例。由agent持续维护更新。',
+   ks:['可执行脚本','自然语言用例','POM库','agent维护']},
+  {ph:'o',nm:'定时巡检调度执行',tm:'定时',
+   in:'<b>keve平台资产</b>(spec+yaml) + <b>调度配置</b>(每日10:00 / 每周一)',
+   out:'<b>线上巡检结果</b> → 平台报告<br>自动回归: AG核心流程(遮罩层) + SK核心流程(锁定权限)<br>环境稳定性检查',
+   th:'keve平台配置调度任务，复用可执行脚本定时线上巡检。',
+   ks:['调度配置','脚本复用','线上巡检','自动回归']},
+];
+
+const NM=[1,1,1,1,2,3,3,4,5,6];
+// step0→n1(init), step1→n1(AI分析), step2→n1(测试计划), step3→n1(执行loop), step4→n2(同步), step5→n3(分发), step6→n3(通知), step7→n4(协同), step8→n5(沉淀), step9→n6(巡检)
+
+const CODE_SPEC=`@keveScene("AG-01: TC类型-无权限状态描述简化")
+static async testTcPortalNoPermissionMask({ page, keveGoal, keveAssert }) {
+  const notAvailablePage = new NotAvailablePage(page);
+  await keveGoal({
+    precondition: "通过链接改id访问TC来源且无权限的智能应用",
+    step: "进入TC类型智能应用详情页（无权限）",
+    expected: "页面显示遮罩层，描述含...即将下线，不再独立维护"
+  }, async () => {
+    await notAvailablePage.navigateToAgentDetail(
+      testData.agents.tcPortal.id, "edit", false);
+    await notAvailablePage.assertNotAvailableVisible(true);
+    await keveAssert("遮罩层可见，描述包含...", { label: "AG01-Step1" });
+  });
+  await keveGoal({
+    step: "观察按钮组区域",
+    expected: "按钮组不显示，整个按钮组区域被隐藏"
+  }, async () => {
+    await notAvailablePage.assertButtonGroupHidden();
+    await keveAssert("按钮组区域完全隐藏", { label: "AG01-Step2" });
+  });
+}`;
+
+function mkCode(code){
+  const pre=document.createElement('pre');
+  pre.style.cssText='font-size:11px;background:#1e293b;color:#e2e8f0;padding:10px 12px;border-radius:6px;margin:6px 0;line-height:1.45;overflow-x:auto;font-family:var(--mono)';
+  pre.textContent=code;
+  return pre;
+}
+const NDS=[document.getElementById('n1'),document.getElementById('n2'),document.getElementById('n3'),document.getElementById('n4'),document.getElementById('n5'),document.getElementById('n6')];
+const PHS=[document.getElementById('ph-d'),document.getElementById('ph-t'),document.getElementById('ph-o')];
+
+let cur=0,playing=false,timer=null,spd=1200;
+const tlEl=document.getElementById('tlEl');
+const cardsEl=document.getElementById('cards');
+
+function build(){
+  tlEl.innerHTML='';
+  let lp='';
+  S.forEach((s,i)=>{
+    if(s.ph!==lp){lp=s.ph;if(i>0){const sep=document.createElement('div');sep.className='Tl-sep';tlEl.appendChild(sep)}}
+    const t=document.createElement('div');t.className='Tl-i '+s.ph;t.onclick=()=>go(i);t.textContent=s.nm;tlEl.appendChild(t);
+  });
+  cardsEl.innerHTML='';
+  S.forEach((s,i)=>{
+    const c=document.createElement('div');c.className='Scard '+s.ph;c.id='c'+i;
+    const phTxt=s.ph==='d'?'开发阶段':s.ph==='t'?'测试阶段':'运维阶段';
+    c.innerHTML=`
+      <div class="Sc-hd">
+        <div class="Sc-ph ${s.ph}">${phTxt}</div>
+        <div class="Sc-nm">${s.nm}</div>
+        <div class="Sc-tm">${s.tm}</div>
+      </div>
+      <div class="Sc-think ${s.ph}">
+        <div class="Sc-thk-l">AI 思考过程</div>
+        <div style="font-size:12px;color:var(--g600);line-height:1.5">${s.th}</div>
+      </div>
+      <div class="Sc-io">
+        <div class="Sc-in">
+          <div class="Sc-io-l">&#9654; 输入 <span class="arrow">&#8594;</span></div>
+          <div class="Sc-io-v">${s.in}</div>
+        </div>
+        <div class="Sc-out">
+          <div class="Sc-io-l">&#9654; 输出 <span class="arrow">&#8594;</span></div>
+          <div class="Sc-io-v">${s.out==='__CODE_BLOCK__'?'<b>6个可执行Playwright spec</b> — 每个包含模块+场景+测试目标(步骤+预期)<br><br><b>agent-mask.spec.ts</b> (15.49KB) @keveModel("智能应用详情页-遮罩层"):':s.out}</div>
+        </div>
+      </div>
+      <div class="Sc-keys">${s.ks.map(k=>`<div class="Sc-k ${s.ph}">${k}</div>`).join('')}</div>
+    `;
+    cardsEl.appendChild(c);
+    if(s.out==='__CODE_BLOCK__'){
+      const outV=c.querySelector('.Sc-out .Sc-io-v');
+      if(outV)outV.appendChild(mkCode(CODE_SPEC));
+    }
+  });
+}
+
+function go(i){
+  cur=i;document.getElementById('Mn').textContent=i+1;
+  tlEl.querySelectorAll('.Tl-i').forEach((el,j)=>{el.classList.remove('act','done');if(j===i)el.classList.add('act');else if(j<i)el.classList.add('done')});
+  S.forEach((s,j)=>{document.getElementById('c'+j).classList.toggle('act',j===i)});
+  const ni=NM[i];
+  NDS.forEach((n,j)=>{n.classList.remove('act','done');if(j===ni)n.classList.add('act');else if(j<ni)n.classList.add('done')});
+  PHS.forEach((p,j)=>{p.classList.remove('act');
+    if(S[i].ph==='d'&&j===0)p.classList.add('act');
+    if(S[i].ph==='t'&&j===1)p.classList.add('act');
+    if(S[i].ph==='o'&&j===2)p.classList.add('act');
+  });
+}
+
+function tp(){
+  if(playing){playing=false;clearTimeout(timer);
+    document.getElementById('Mbtn').classList.remove('on');
+    document.getElementById('Mi').innerHTML='&#9654;';document.getElementById('Mt').textContent='播放';
+  }else{playing=true;if(cur>=9)cur=-1;
+    document.getElementById('Mbtn').classList.add('on');
+    document.getElementById('Mi').innerHTML='&#9646;&#9646;';document.getElementById('Mt').textContent='停止';
+    nx();
+  }
+}
+function nx(){if(!playing)return;cur++;if(cur>9){cur=0;tlEl.querySelectorAll('.Tl-i').forEach(e=>e.classList.remove('done'))}go(cur);timer=setTimeout(nx,spd)}
+function cs(){spd=parseInt(document.getElementById('Ms').value);if(playing){clearTimeout(timer);timer=setTimeout(nx,spd)}}
+
+build();go(0);
+</script>
+</body>
+</html>

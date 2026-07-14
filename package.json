@@ -1,0 +1,23 @@
+{
+  "name": "eve",
+  "private": true,
+  "packageManager": "pnpm@9.10.0",
+  "version": "0.0.1",
+  "description": "AI test monorepo managed by pnpm",
+  "scripts": {
+    "dev": "pnpm --filter @ks-data/gui-agent dev",
+    "start": "pnpm --filter @ks-data/gui-agent start",
+    "build": "pnpm -r build",
+    "build:core": "pnpm --filter @ks-data/keve-core build",
+    "build:agent": "pnpm --filter @ks-data/gui-agent build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {},
+  "pnpm": {
+    "patchedDependencies": {},
+    "overrides": {
+      "@ladybugdb/core": "0.15.1"
+    }
+  }
+}

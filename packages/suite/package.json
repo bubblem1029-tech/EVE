@@ -1,0 +1,81 @@
+{
+  "name": "@eve/suite",
+  "version": "0.0.1",
+  "description": "AI-powered full-stack test agent CLI - static analysis, unit test, component test, E2E test, execute, evaluate, and report",
+  "license": "MIT",
+  "bin": {
+    "keve": "./dist/bin/keve.js"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./global-setup": {
+      "types": "./dist/core/global-setup.d.ts",
+      "default": "./dist/core/global-setup.js"
+    },
+    "./keve-report": {
+      "types": "./dist/core/keve-report.d.ts",
+      "default": "./dist/core/keve-report.js"
+    },
+    "./keve-test": {
+      "types": "./dist/core/keve-test.d.ts",
+      "default": "./dist/core/keve-test.js"
+    },
+    "./page-agent": {
+      "types": "./dist/page-agent/agent.d.ts",
+      "default": "./dist/page-agent/agent.js"
+    },
+    "./keve-aspect": {
+      "types": "./dist/core/keve-aspect.d.ts",
+      "default": "./dist/core/keve-aspect.js"
+    },
+    "./action-log": {
+      "types": "./dist/core/action-log-writer.d.ts",
+      "default": "./dist/core/action-log-writer.js"
+    },
+    "./learned-actions": {
+      "types": "./dist/core/learned-actions.d.ts",
+      "default": "./dist/core/learned-actions.js"
+    },
+    "./spec/keve-read-doc": {
+      "types": "./dist/spec/keve-read-doc.d.ts",
+      "default": "./dist/spec/keve-read-doc.js"
+    }
+  },
+  "files": [
+    "dist",
+    "doc",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc && chmod +x dist/bin/keve.js && cp src/page-agent/system_prompt.md dist/page-agent/",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "keve": "node dist/bin/keve.js",
+    "prepublishOnly": "pnpm build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bubblem1029-tech/EVE.git"
+  },
+  "dependencies": {
+    "@eve/suite": "0.0.1",
+    "@vitest/coverage-v8": "^4.1.9",
+    "@vue/test-utils": "^2.4.6",
+    "chalk": "^4.1.0",
+    "commander": "^13.1.0",
+    "jsdom": "^26.1.0",
+    "vitest": "^4.1.9",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^25.6.0",
+    "tsx": "^4.19.0",
+    "typescript": "^6.0.2"
+  }
+}

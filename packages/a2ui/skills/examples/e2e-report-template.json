@@ -1,0 +1,49 @@
+{
+  "mode": "template",
+  "templateId": "e2e-report",
+  "vars": {
+    "projectName": "llm-agent",
+    "planName": "E2E 回归测试",
+    "planId": "plan-1718726400-a1b2c3",
+    "passRate": 83,
+    "totalCases": 12,
+    "passedCases": 10,
+    "failedCases": 2,
+    "skippedCases": 0,
+    "duration": "3m 42s",
+    "cases": [
+      {
+        "id": "case-login-001",
+        "name": "登录页面加载",
+        "module": "认证模块",
+        "scenario": "用户登录",
+        "status": "fail",
+        "duration": "30.1s",
+        "errorMessage": "Timeout 30000ms exceeded",
+        "screenshotUrl": "/artifacts/plan-xxx/screenshots/login-fail.png",
+        "traceUrl": "/artifacts/plan-xxx/traces/login-fail.trace.zip"
+      }
+    ],
+    "diagnoses": [
+      {
+        "errorCategory": "A_framework",
+        "cases": ["case-login-001", "case-chat-003"],
+        "suggestion": "选择器/时序问题，建议更新定位策略"
+      }
+    ],
+    "coverage": {
+      "e2e": 45,
+      "unit": 32,
+      "modules": [
+        { "name": "认证模块", "e2e": 60 },
+        { "name": "对话模块", "e2e": 40 },
+        { "name": "配置模块", "e2e": 30 }
+      ]
+    },
+    "artifacts": {
+      "reportHtml": "/artifacts/plan-xxx/test-report.html",
+      "executionResultsJson": "/artifacts/plan-xxx/execution-results.json",
+      "diagnosisReportYaml": "/artifacts/plan-xxx/diagnosis-report.yaml"
+    }
+  }
+}

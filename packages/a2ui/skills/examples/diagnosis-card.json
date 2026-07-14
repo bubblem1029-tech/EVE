@@ -1,0 +1,24 @@
+{
+  "mode": "generative",
+  "id": "diag-1",
+  "type": "DiagnosisCard",
+  "props": {
+    "errorCategory": "A_framework",
+    "failedCases": [
+      {
+        "caseId": "case-login-001",
+        "caseName": "登录页面加载",
+        "errorMessage": "Timeout 30000ms exceeded waiting for selector '.login-btn'",
+        "suggestion": "按钮选择器可能因框架升级而变更，建议更新为 '[data-testid=login-btn]'"
+      },
+      {
+        "caseId": "case-chat-003",
+        "caseName": "对话消息发送",
+        "errorMessage": "Element is not clickable — element is overlapped by notification toast",
+        "suggestion": "添加等待 toast 消失的逻辑，或使用 force: true 选项"
+      }
+    ],
+    "fixable": true,
+    "summary": "2 个失败用例属于 A_framework 类别（选择器/时序问题），可以自动修复"
+  }
+}

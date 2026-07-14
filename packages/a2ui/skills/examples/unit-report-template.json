@@ -1,0 +1,43 @@
+{
+  "mode": "template",
+  "templateId": "unit-report",
+  "vars": {
+    "projectName": "llm-agent",
+    "planName": "单元测试回归",
+    "planId": "plan-1718726400-d4e5f6",
+    "passRate": 92,
+    "totalSuites": 5,
+    "passedSuites": 4,
+    "failedSuites": 1,
+    "duration": "1m 15s",
+    "suites": [
+      {
+        "name": "auth.utils.spec.ts",
+        "file": "src/auth/__tests__/auth.utils.spec.ts",
+        "passed": 8,
+        "failed": 0,
+        "duration": "12.3s"
+      },
+      {
+        "name": "chat-parser.spec.ts",
+        "file": "src/chat/__tests__/chat-parser.spec.ts",
+        "passed": 6,
+        "failed": 2,
+        "duration": "8.7s",
+        "errorMessages": ["Expected 'parsed' to be 'complete'"]
+      }
+    ],
+    "diagnoses": [
+      {
+        "errorCategory": "B_business",
+        "cases": ["chat-parser-parseEdge", "chat-parser-parseNode"],
+        "suggestion": "解析逻辑需要适配新的消息格式，建议更新 parser 函数"
+      }
+    ],
+    "coverage": {
+      "line": 78,
+      "branch": 62,
+      "function": 85
+    }
+  }
+}

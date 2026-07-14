@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.output/
+.DS_Store
+*.log
+.env
+.env.local
+coverage/
+.codeflicker
+github
+pnpm-lock.yaml
+# Rust / Tauri build artifacts
+**/target/
+

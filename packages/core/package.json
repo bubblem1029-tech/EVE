@@ -1,0 +1,59 @@
+{
+  "name": "@eve/suite",
+  "version": "0.0.1",
+  "description": "EVE agent core runtime infrastructure — LLM client, agent loop, skill loader, context management",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./llm": {
+      "types": "./dist/llm/index.d.ts",
+      "default": "./dist/llm/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "default": "./dist/context/index.js"
+    },
+    "./agent-loop": {
+      "types": "./dist/agent-loop/index.d.ts",
+      "default": "./dist/agent-loop/index.js"
+    },
+    "./skill": {
+      "types": "./dist/skill/index.d.ts",
+      "default": "./dist/skill/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "default": "./dist/agent/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "default": "./dist/tools/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bubblem1029-tech/EVE.git"
+  },
+  "dependencies": {
+    "glob": "^13.0.6",
+    "jsonrepair": "^3.14.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2"
+  }
+}
