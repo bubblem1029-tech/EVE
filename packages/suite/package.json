@@ -1,6 +1,6 @@
 {
-  "name": "@eve/suite",
-  "version": "0.0.1",
+  "name": "@kkeve/suite",
+  "version": "0.0.7",
   "description": "AI-powered full-stack test agent CLI - static analysis, unit test, component test, E2E test, execute, evaluate, and report",
   "license": "MIT",
   "bin": {
@@ -62,7 +62,7 @@
     "url": "https://github.com/bubblem1029-tech/EVE.git"
   },
   "dependencies": {
-    "@eve/suite": "0.0.1",
+    "@kkeve/core": "^0.0.4",
     "@vitest/coverage-v8": "^4.1.9",
     "@vue/test-utils": "^2.4.6",
     "chalk": "^4.1.0",

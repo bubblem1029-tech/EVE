@@ -11,7 +11,7 @@
  * Usage in playwright config:
  *   reporter: [
  *     ['list'],
- *     ['@ks-data/keve-suite/keve-report'],
+ *     ['@kkeve/suite/keve-report'],
  *   ]
  */
 

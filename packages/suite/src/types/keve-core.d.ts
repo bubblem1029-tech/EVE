@@ -1,4 +1,4 @@
-declare module '@ks-data/keve-core/llm' {
+declare module '@kkeve/core/llm' {
   export interface Message {
     role: string;
     content: string | ContentItem[];

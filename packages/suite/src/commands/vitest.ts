@@ -15,12 +15,12 @@ import chalk from 'chalk';
  *
  * pnpm structure:
  *   node_modules/.pnpm/@ks-data+keve-agent@.../node_modules/
- *     ├── @ks-data/keve-suite/    ← __dirname is in dist/commands/ here
+ *     ├── @kkeve/suite/    ← __dirname is in dist/commands/ here
  *     └── vitest/                 ← sibling dep, walk up to find
  *
  * npm/node structure:
  *   node_modules/
- *     ├── @ks-data/keve-suite/    ← __dirname is in dist/commands/ here
+ *     ├── @kkeve/suite/    ← __dirname is in dist/commands/ here
  *     └── vitest/                 ← sibling dep, walk up to find
  */
 function findVitestBinary(): { bin: string; nodeModules: string } | null {
@@ -116,7 +116,7 @@ export async function vitest(options: VitestOptions): Promise<void> {
 
   if (!vitestInfo) {
     console.error(chalk.red('  ✗ Vitest not found'));
-    console.error(chalk.yellow('    Install: pnpm add -D @ks-data/keve-suite (includes vitest)'));
+    console.error(chalk.yellow('    Install: pnpm add -D @kkeve/suite (includes vitest)'));
     process.exit(1);
   }
 

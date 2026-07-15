@@ -11,6 +11,7 @@
 
 // LLM
 export { LLM, InvokeError, InvokeErrorType } from './llm/index'
+export { LLM_CALL_START, LLM_CALL_END } from './llm/index'
 export type {
 	ChatResult,
 	ContentItem,
@@ -20,6 +21,9 @@ export type {
 	LLMConfig,
 	Message,
 	Tool,
+	LLMCallStartDetail,
+	LLMCallEndDetail,
+	LLMCallMethod,
 } from './llm/index'
 
 // Context

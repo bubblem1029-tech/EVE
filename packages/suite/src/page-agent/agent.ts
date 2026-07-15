@@ -15,7 +15,7 @@
  */
 
 import type { Page } from '@playwright/test';
-import { LLM, type Message, type ContentItem, type Tool } from '@ks-data/keve-core/llm';
+import { LLM, type Message, type ContentItem, type Tool } from '@kkeve/core/llm';
 import { z } from 'zod';
 import * as fs from 'node:fs';
 import * as path from 'node:path';

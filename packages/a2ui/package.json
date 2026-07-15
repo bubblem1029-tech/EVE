@@ -1,6 +1,6 @@
 {
-  "name": "@eve/a2ui",
-  "version": "0.0.1",
+  "name": "@kkeve/a2ui",
+  "version": "0.0.2",
   "description": "A2UI spec for keve test platform — shared catalog, types, and schema manager",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

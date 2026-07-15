@@ -10,7 +10,7 @@
  * keveAssert 已被吸收：keveGoal 的 expected 即断言语义
  *
  * Usage:
- *   import { test, expect } from '@ks-data/keve-suite/keve-test';
+ *   import { test, expect } from '@kkeve/suite/keve-test';
  *
  *   test('my test', async ({ page, keveGoal }) => {
  *     await keveGoal({ step: '导航到列表页', expected: '页面加载完成' }, async () => {

@@ -4,7 +4,7 @@
  * Creates the .keve/ workspace, Playwright infrastructure,
  * and copies keve skills into .codeflicker/skills/.
  *
- * Note: keveAssert is exported directly from @ks-data/keve-suite (import { keveAssert } from '@ks-data/keve-suite')
+ * Note: keveAssert is exported directly from @kkeve/suite (import { keveAssert } from '@kkeve/suite')
  * — no file needs to be written to the project.
  */
 
@@ -265,10 +265,10 @@ export async function init(options: InitOptions): Promise<void> {
     console.log(chalk.gray('  Exists:  vitest.config.ts (preserved)'));
   }
 
-  // Note: keveAssert is exported from @ks-data/keve-suite directly
+  // Note: keveAssert is exported from @kkeve/suite directly
   // No file needs to be written — users import it:
-  //   import { keveAssert } from '@ks-data/keve-suite';
-  console.log(chalk.gray('  ⓘ keveAssert available via: import { keveAssert } from "@ks-data/keve-suite"'));
+  //   import { keveAssert } from '@kkeve/suite';
+  console.log(chalk.gray('  ⓘ keveAssert available via: import { keveAssert } from "@kkeve/suite"'));
 
   console.log(chalk.green('\n  ✓ keve init complete'));
   console.log(chalk.gray('\n  Next steps:'));

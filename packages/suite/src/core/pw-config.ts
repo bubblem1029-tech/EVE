@@ -62,7 +62,7 @@ const round = process.env.KEVE_ROUND || 'latest';
 const resultDir = path.join(taskDir, 'test-artifacts', \`round-\${round}\`);
 
 export default defineConfig({
-  globalSetup: require.resolve('@ks-data/keve-suite/global-setup'),
+  globalSetup: require.resolve('@kkeve/suite/global-setup'),
   testDir: path.join(taskDir, 'keve_test_spec'),
   fullyParallel: true,
   workers: ${workers},
@@ -72,7 +72,7 @@ export default defineConfig({
   reporter: [
     ['list'],
     ['json', { outputFile: path.join(resultDir, 'test-results.json') }],
-    [require.resolve('@ks-data/keve-suite/keve-report')],
+    [require.resolve('@kkeve/suite/keve-report')],
   ],
   use: {
     baseURL: ${baseURLLine},${cdp ? `\n    // CDP mode: login state preserved via connected Chrome` : `\n    storageState: path.resolve(projectRoot, '.auth/storage-state.json'),`}

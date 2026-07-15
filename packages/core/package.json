@@ -1,6 +1,6 @@
 {
-  "name": "@eve/suite",
-  "version": "0.0.1",
+  "name": "@kkeve/core",
+  "version": "0.0.5",
   "description": "EVE agent core runtime infrastructure — LLM client, agent loop, skill loader, context management",
   "license": "MIT",
   "main": "./dist/index.js",

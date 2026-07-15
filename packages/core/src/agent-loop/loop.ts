@@ -204,6 +204,7 @@ export class AgentLoop {
 
 					// Execute the tool via registry
 					this.emitEvent(onEvent, 'tool_call_start', definition.name, {
+						callId: toolCall.id,
 						tool: toolName,
 						args: toolArgs,
 						turn: turnCounter,
@@ -226,6 +227,7 @@ export class AgentLoop {
 					}
 
 					this.emitEvent(onEvent, 'tool_call_end', definition.name, {
+						callId: toolCall.id,
 						tool: toolName,
 						result: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
 						turn: turnCounter,
