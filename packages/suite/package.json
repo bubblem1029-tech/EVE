@@ -1,6 +1,6 @@
 {
   "name": "@kkeve/suite",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "AI-powered full-stack test agent CLI - static analysis, unit test, component test, E2E test, execute, evaluate, and report",
   "license": "MIT",
   "bin": {

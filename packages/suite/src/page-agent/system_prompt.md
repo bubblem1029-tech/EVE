@@ -126,14 +126,20 @@ You must call the `done` action in one of these cases:
 The `done` action requires two fields:
 - `verdict`: Your test verdict, must be one of:
   - `"pass"`: The expected state described in <user_request> is fully achieved. Examine the screenshot carefully before deciding.
-  - `"fail"`: The page is accessible but the expected state is NOT achieved (e.g. text mismatch, wrong element state, visual difference).
-  - `"blocked"`: Cannot continue testing (e.g. SSO login redirect, connection refused, page not loading).
+  - `"fail"`: The page is accessible but the expected state is NOT achieved (e.g. text mismatch, wrong element state, visual difference). This indicates a **code defect**.
+  - `"blocked"`: Cannot continue testing. This covers BOTH environment issues (e.g. SSO login redirect, connection refused, page not loading) **AND permission-denied / no-access states** (e.g. page shows "您没有...编辑权限", "无访问权限", "暂无数据", "申请体验权限") where the **test account lacks the required access**. A permission-denied page is a **precondition issue**, not a code defect — use `"blocked"`, NOT `"fail"`.
+
+**Permission-denied → blocked (critical rule):**
+When the screenshot or accessibility tree shows a permission-denied / no-access message (e.g. "您没有数据知识库[...]的编辑权限", "无访问权限", "暂无数据", "申请体验权限"), this means the **test account does not have the required permission for the target resource**. This is a precondition issue, NOT an application bug.
+- Call `done(verdict="blocked")` immediately with the permission message in `text`.
+- Do NOT call `done(verdict="fail")` — the application is correctly enforcing access control, the code is NOT defective.
+- Do NOT try to navigate away to find another resource or "work around" the permission issue — the test must verify the **target resource specified in the precondition**, not a substitute.
 - `text`: Describe what you observed and why you reached this conclusion.
 
 Important:
 - Set `verdict` to `"pass"` ONLY if the expected state is fully achieved. Be honest and rigorous.
 - Set `verdict` to `"fail"` when the page works but does not match the expected state. Describe the mismatch in `text`.
-- Set `verdict` to `"blocked"` when the environment prevents testing (not the application's fault).
+- Set `verdict` to `"blocked"` when the environment prevents testing OR when the page shows a permission-denied / no-access state (test account lacks required access). Not the application's fault.
 - Do NOT call done with verdict="pass" if the screenshot shows the expected state is NOT achieved.
 - **When to stop immediately**: If `execute_javascript` or another deterministic tool returns a result that definitively proves the expected state CANNOT be achieved (e.g. computed style value mismatch), call `done` with the appropriate verdict right away. Do NOT continue exploring, scrolling, or navigating — more actions will not change a CSS computed value or a DOM property. Wasting steps on already-failed assertions reduces test reliability.
 - **When prior_execution shows the conclusion**: If the `<prior_execution>` block shows an assertion failure with `Expected:` and `Received:` values, the deterministic script has already captured the precise value. You may use `execute_javascript` once to confirm the current value, then immediately call `done(verdict="fail")` with the actual vs expected values in `text`. Do NOT explore further — the assertion already proved the mismatch.

@@ -37,9 +37,9 @@ export const tools = new Map<string, PageAgentTool>();
 
 // --- done ---
 tools.set('done', tool({
-    description: 'Complete the task with a test conclusion. Use this when the expected state is achieved, not achieved, or you are blocked.',
+    description: 'Complete the task with a test conclusion. Use this when the expected state is achieved, not achieved, or you are blocked. When the page shows a permission-denied / no-access message (e.g. "您没有...编辑权限", "无访问权限", "暂无数据") that is NOT caused by an application bug but by the test account lacking the required permission, use verdict="blocked" — this is a precondition issue, not a code defect. Only use verdict="fail" when the page IS accessible/functional but the expected UI state is not met.',
     inputSchema: z.object({
-        verdict: z.enum(['pass', 'fail', 'blocked']).describe('Test verdict: "pass"=expected state achieved; "fail"=page accessible but expected not met; "blocked"=cannot continue (SSO, connection refused, etc.)'),
+        verdict: z.enum(['pass', 'fail', 'blocked']).describe('Test verdict: "pass"=expected state achieved; "fail"=page accessible but expected not met (code defect); "blocked"=cannot continue — includes SSO redirect, connection refused, AND permission-denied/no-access pages where the test account lacks the required access (precondition not met, NOT a code defect)'),
         text: z.string().describe('Summary of what was achieved, why it failed, or why blocked'),
     }),
     execute: async function (this: KevePageAgent, input) {

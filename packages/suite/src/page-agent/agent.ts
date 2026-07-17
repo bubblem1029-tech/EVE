@@ -6,8 +6,10 @@
  *   - MacroTool: merge all tool schemas into one LLM output
  *   - History events: step/observation/error stream
  *   - Reflection-before-action: evaluation + memory + next_goal + action
- *   - Screenshot injected into LLM prompt as multimodal input — LLM self-evaluates visually
- *   - No external verification — LLM sees screenshot each step, judges goal state itself
+ *   - Per-step: ariaSnapshot text only (no screenshot) — Option C
+ *   - Initial screenshots (goal-before + fn-after) injected on step 0 as multimodal context
+ *   - Done-time screenshot captured as goal-after evidence
+ *   - On-demand screenshots via visual_locate tool (when element needs visual identification)
  *
  * Usage:
  *   const agent = new KevePageAgent(page, { maxSteps: 5 });
@@ -86,6 +88,10 @@ export interface AgentOptions {
     hooks?: AgentHooks;
     /** External abort signal (e.g. per-goal timeout). When aborted, internal abortController is also triggered. */
     signal?: AbortSignal;
+    /** goal-before 截图路径（相对 taskDir）— fn 执行前的页面原始状态 */
+    goalScreenshotBefore?: string;
+    /** fn-after 截图路径（相对 taskDir）— fn 执行后的页面状态 */
+    fnAfterScreenshot?: string;
 }
 
 // ─── KevePageAgent ──────────────────────────────────────────────────────
@@ -180,37 +186,20 @@ export class KevePageAgent {
                 try {
                     console.group(`step: ${stepCount}`);
 
-                    // ── Observe: get browser state ──
+                    // ── Observe: get browser state (ariaSnapshot only — no per-step screenshot) ──
                     console.log('\x1b[34m\x1b[1m👀 Observing...\x1b[0m');
                     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
                     const url = this.page.url();
                     console.log(`  url: ${url.slice(0, 120)} | step ${stepCount + 1}/${maxSteps}`);
 
-                    // ── Capture screenshot (used for both LLM multimodal input and artifact save) ──
-                    let screenshotBuf: Buffer | undefined;
-                    let screenshotBase64: string | undefined;
-                    try {
-                        screenshotBuf = await this.page.screenshot({ type: 'png', timeout: 10000 });
-                        screenshotBase64 = screenshotBuf.toString('base64');
-                    } catch (e: any) {
-                        // Retry once with longer timeout (font loading can be slow on some pages)
-                        try {
-                            await new Promise(r => setTimeout(r, 500));
-                            screenshotBuf = await this.page.screenshot({ type: 'png', timeout: 15000 });
-                            screenshotBase64 = screenshotBuf.toString('base64');
-                        } catch (e2: any) {
-                            console.log(`[agent] screenshot capture failed (non-critical): ${e2.message}`);
-                        }
-                    }
-
-                    // ── Assemble messages (multimodal: text + screenshot) ──
-                    const userText = this.assembleUserPrompt(step, expected, snapshot, url, stepCount, maxSteps, !!screenshotBase64);
+                    // ── Assemble messages (text-only per step; initial screenshots on step 0) ──
+                    const userText = this.assembleUserPrompt(step, expected, snapshot, url, stepCount, maxSteps);
                     let userContent: string | ContentItem[];
-                    if (screenshotBase64) {
-                        userContent = [
-                            { type: 'text', text: userText },
-                            { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotBase64}`, detail: 'high' } },
-                        ];
+                    if (stepCount === 0) {
+                        const initialImages = this.loadInitialScreenshots(options);
+                        userContent = initialImages.length > 0
+                            ? [{ type: 'text', text: userText }, ...initialImages]
+                            : userText;
                     } else {
                         userContent = userText;
                     }
@@ -247,15 +236,7 @@ export class KevePageAgent {
                     const actionName = execResult.toolName;
                     const actionInput = macroInput;
 
-                    // Save screenshot (reuse buffer already captured for LLM)
-                    let screenshotPath: string | undefined;
-                    if (screenshotBuf) {
-                        try {
-                            screenshotPath = this.saveScreenshotBuffer(screenshotBuf, stepCount, step);
-                        } catch { /* non-critical */ }
-                    }
-
-                    // Record step event
+                    // Record step event (screenshotPath set later for done actions)
                     if (execResult.error) {
                         console.log(`\x1b[31m\x1b[1m${actionName} (error: ${execResult.error.slice(0, 80)})\x1b[0m`);
                     } else if (execResult.duration !== undefined) {
@@ -275,7 +256,7 @@ export class KevePageAgent {
                         toolOutput: execResult.output,
                         toolError: execResult.error,
                         snapshot,
-                        screenshotPath,
+                        screenshotPath: undefined,
                     };
                     this.events.push(stepEvent);
 
@@ -284,8 +265,14 @@ export class KevePageAgent {
                         this.pushObservation(`Action "${actionName}" failed: ${execResult.error}. Try a different approach.`);
                     }
 
-                    // ── Check: if "done", return directly with test conclusion ──
+                    // ── Check: if "done", capture done-time screenshot + return with test conclusion ──
                     if (actionName === 'done') {
+                        // Capture done-time screenshot as goal-after evidence
+                        try {
+                            const doneBuf = await this.page.screenshot({ type: 'png', timeout: 15000 });
+                            stepEvent.screenshotPath = this.saveScreenshotBuffer(doneBuf, stepCount, step);
+                        } catch { /* non-critical */ }
+
                         // Extract conclusion: 4-level backoff
                         let conclusion: 'pass' | 'fail' | 'blocked';
                         const verdictField = actionInput?.verdict as string | undefined;
@@ -384,7 +371,6 @@ export class KevePageAgent {
         url: string,
         stepIndex: number,
         maxSteps: number,
-        hasScreenshot: boolean,
     ): string {
         let prompt = '';
 
@@ -403,6 +389,18 @@ export class KevePageAgent {
                 ? `\nSource: ${this.options.fnSource}`
                 : '';
             prompt += `<prior_execution>\nA deterministic script was executed BEFORE your Re-Act loop.\n${resultLine}${sourceLine}\n</prior_execution>\n`;
+        }
+        // <initial_screenshots>: only on first step, describe the before/after fn screenshots
+        if (stepIndex === 0 && (this.options?.goalScreenshotBefore || this.options?.fnAfterScreenshot)) {
+            prompt += '<initial_screenshots>\n';
+            if (this.options?.goalScreenshotBefore) {
+                prompt += 'goal-before: Screenshot of the page state BEFORE any test action (fn执行前的页面原始状态).\n';
+            }
+            if (this.options?.fnAfterScreenshot) {
+                prompt += 'fn-after: Screenshot of the page state AFTER the deterministic fn script executed (fn执行后的页面状态). Compare with goal-before to understand what fn changed.\n';
+            }
+            prompt += 'These screenshots are attached as images to give you visual context of the pre/post fn execution state. Use them to understand what fn did, then rely on the accessibility tree (ariaSnapshot) for per-step decisions.\n';
+            prompt += '</initial_screenshots>\n';
         }
         prompt += '<step_info>\n';
         prompt += `Step ${stepIndex + 1} of ${maxSteps} max steps\n`;
@@ -432,9 +430,6 @@ export class KevePageAgent {
         prompt += '<browser_state>\n';
         prompt += `Current URL: ${url}\n\n`;
         prompt += `Accessibility Tree (YAML):\n\`\`\`yaml\n${snapshot}\n\`\`\`\n`;
-        if (hasScreenshot) {
-            prompt += '\n<page_screenshot>\nA screenshot of the current page is provided as an image attached to this message. Use it as the primary visual source of truth for what is actually visible on the page. Cross-reference the screenshot with the accessibility tree to make accurate judgments — especially before calling done(success=true) to verify the expected state is truly achieved.\n</page_screenshot>\n';
-        }
         prompt += '</browser_state>\n\n';
 
         return prompt;
@@ -493,6 +488,24 @@ export class KevePageAgent {
         const file = path.join(screenshotsDir, `agent-step${stepIndex}-${safeName}-${Date.now()}.png`);
         fs.writeFileSync(file, buf);
         return path.relative(taskDir, file);
+    }
+
+    /** Load initial screenshots (goal-before + fn-after) as ContentItem[] for step 0 multimodal input */
+    private loadInitialScreenshots(options?: AgentOptions): ContentItem[] {
+        const items: ContentItem[] = [];
+        const taskDir = process.env.KEVE_TASK_DIR || '.keve';
+        for (const relPath of [options?.goalScreenshotBefore, options?.fnAfterScreenshot]) {
+            if (!relPath) continue;
+            try {
+                const absPath = path.resolve(taskDir, relPath);
+                const buf = fs.readFileSync(absPath);
+                items.push({
+                    type: 'image_url',
+                    image_url: { url: `data:image/png;base64,${buf.toString('base64')}`, detail: 'high' },
+                });
+            } catch { /* non-critical */ }
+        }
+        return items;
     }
 
     /**
@@ -590,6 +603,8 @@ export async function reactLoop(
         fnSource?: string;
         fnResult?: { error?: string; success?: boolean };
         signal?: AbortSignal;
+        goalScreenshotBefore?: string;
+        fnAfterScreenshot?: string;
     } = {},
 ): Promise<{
     actions: any[];
@@ -644,6 +659,8 @@ export async function reactLoop(
             fnSource: options.fnSource,
             fnResult: options.fnResult,
             signal: options.signal,
+            goalScreenshotBefore: options.goalScreenshotBefore,
+            fnAfterScreenshot: options.fnAfterScreenshot,
         });
     } catch (execErr: any) {
         const msg = execErr?.message || String(execErr);

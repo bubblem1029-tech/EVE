@@ -4,13 +4,11 @@
  * Three phases: before → (goal body or rescue) → after
  * User-invisible: aspects are registered by the framework, not by test authors.
  *
- * Built-in aspects:
- * - screenshot-on-enter (before, order=10) — capture screenshot before goal
- * - react-rescue (rescue, order=0) — Re-Act loop when fn() throws
- * - expected-check (after, order=0) — verify expected state via aiAssert
- * - action-log-write (after, order=10) — append to action-log.jsonl
- * - learnedActions-update (after, order=20) — update in-memory cache
- * - screenshot-on-fail (after, order=30) — capture screenshot on failure
+ * Registered aspects:
+ * - learnedActions-update (after, order=20) — update in-memory cache on success
+ *
+ * 截图由 keveGoal 内部直接管理（goal-before / goal-after / agent 每步截图），
+ * 不通过 aspect 注册，避免截图时机与 agent 执行步骤脱节。
  */
 
 export type AspectPhase = 'before' | 'rescue' | 'after';

@@ -146,6 +146,13 @@ export const test = base.extend<KeveFixture>({
       // Run before aspects
       await keveAspect.runPhase('before', ctx);
 
+      // ── Capture goal-before screenshot (fn 之前的页面原始状态) ──
+      // 语义：记录"测试动作发生前"的页面，供报告 before/after 对照
+      let goalScreenshotBefore = '';
+      try {
+        goalScreenshotBefore = await captureScreenshot(page, options.step, goalMeta.order, 'before');
+      } catch { /* non-critical */ }
+
       let result: GoalResult;
       const fnSource = fn?.toString() || undefined;
 
@@ -160,19 +167,13 @@ export const test = base.extend<KeveFixture>({
         }
       }
 
-      // ── Capture "before" screenshot (page state before agent starts) ──
-      let goalScreenshotBefore = '';
-      try {
-        const buf = await page.screenshot({ type: 'png', timeout: 15000 });
-        const taskDir = process.env.KEVE_TASK_DIR || '.keve';
-        const round = process.env.KEVE_ROUND || 'latest';
-        const screenshotsDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
-        fs.mkdirSync(screenshotsDir, { recursive: true });
-        const safeName = options.step.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_').slice(0, 30);
-        const file = path.join(screenshotsDir, `goal-before-${goalMeta.order}-${safeName}-${Date.now()}.png`);
-        fs.writeFileSync(file, buf);
-        goalScreenshotBefore = path.relative(taskDir, file);
-      } catch { /* non-critical */ }
+      // ── Capture fn-after screenshot (fn 执行后的页面状态，传给 agent 说明执行前后) ──
+      let fnAfterScreenshot = '';
+      if (fn) {
+        try {
+          fnAfterScreenshot = await captureScreenshot(page, options.step, goalMeta.order, 'after-fn');
+        } catch { /* non-critical */ }
+      }
 
       // ── Hand off to agent: agent does Re-Act ──
       const learnedHint = learnedActions.getHint(options.step);
@@ -180,8 +181,8 @@ export const test = base.extend<KeveFixture>({
       let reactTimedOut = false;
 
       // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
-      // Default 120s per goal; total test timeout should be ≥ (goals × 120s + overhead)
-      const GOAL_TIMEOUT_MS = 120_000;
+      // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
+      const GOAL_TIMEOUT_MS = 300_000;
       const goalTimeoutController = new AbortController();
       const goalTimeout = setTimeout(() => {
         goalTimeoutController.abort();
@@ -199,6 +200,8 @@ export const test = base.extend<KeveFixture>({
             fnSource,
             fnResult: fnError ? { error: fnError } : { success: true },
             signal: goalTimeoutController.signal,
+            goalScreenshotBefore: goalScreenshotBefore || undefined,
+            fnAfterScreenshot: fnAfterScreenshot || undefined,
           },
         );
       } catch (reactErr: any) {
@@ -241,21 +244,18 @@ export const test = base.extend<KeveFixture>({
       // 通过 Playwright attachment 流到 KeveReporter.onTestEnd
       // 注意：screenshotBase64 不再写入 attachment（截图已保存到文件系统，路径见 goalScreenshotBefore/goalScreenshotAfter）
       const diagnosticHints = (reactResult as any).diagnosticHints || [];
+      // ── goalScreenshotAfter = agent done 时的截图（done-time screenshot） ──
+      // agent.ts 在 done 工具触发时截图并写入 stepEvent.screenshotPath，
+      // 这里复用该路径作为 goal-after 证据（与 agent 判定时刻一致，避免状态漂移）。
       let goalScreenshotAfter = '';
       try {
-        const buf = await page.screenshot({ type: 'png', timeout: 15000 });
-        const taskDir = process.env.KEVE_TASK_DIR || '.keve';
-        const round = process.env.KEVE_ROUND || 'latest';
-        const screenshotsDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
-        fs.mkdirSync(screenshotsDir, { recursive: true });
-        const safeName = options.step.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_').slice(0, 30);
-        const file = path.join(screenshotsDir, `goal-after-${goalMeta.order}-${safeName}-${Date.now()}.png`);
-        fs.writeFileSync(file, buf);
-        goalScreenshotAfter = path.relative(taskDir, file);
-        console.log(`[keveGoal] screenshot captured: ${buf.length} bytes (path: ${goalScreenshotAfter})`);
-      } catch (e: any) {
-        console.log(`[keveGoal] screenshot failed: ${e.message}`);
-      }
+        const lastActionWithShot = [...(reactResult.actions || [])]
+          .reverse()
+          .find((a: any) => a.screenshotPath);
+        if (lastActionWithShot?.screenshotPath) {
+          goalScreenshotAfter = lastActionWithShot.screenshotPath;
+        }
+      } catch { /* non-critical */ }
       await testInfo.attach('keveGoalResult', {
         contentType: 'application/json',
         body: Buffer.from(JSON.stringify({
@@ -350,3 +350,26 @@ export const test = base.extend<KeveFixture>({
 // Register extended test with keve-decorators so @keveModel uses the correct test
 import { setKeveTest } from './keve-decorators';
 setKeveTest(test);
+
+// ── 辅助函数 ──
+
+/**
+ * 截图并保存到 test-artifacts，返回相对 taskDir 的路径
+ * @param phase 'before' | 'after-fn' — 用于文件名前缀
+ */
+async function captureScreenshot(
+  page: import('@playwright/test').Page,
+  stepName: string,
+  order: number,
+  phase: 'before' | 'after-fn',
+): Promise<string> {
+  const buf = await page.screenshot({ type: 'png', timeout: 15000 });
+  const taskDir = process.env.KEVE_TASK_DIR || '.keve';
+  const round = process.env.KEVE_ROUND || 'latest';
+  const screenshotsDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
+  fs.mkdirSync(screenshotsDir, { recursive: true });
+  const safeName = stepName.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 30);
+  const file = path.join(screenshotsDir, `goal-${phase}-${order}-${safeName}-${Date.now()}.png`);
+  fs.writeFileSync(file, buf);
+  return path.relative(taskDir, file);
+}

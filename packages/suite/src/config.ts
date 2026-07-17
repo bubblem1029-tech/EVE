@@ -64,7 +64,7 @@ const DEFAULT_CONFIG: KeveConfig = {
     timeout_ms: 1200000,
     retries: 0,
     reporter: 'json',
-    screenshot: 'only-on-failure',
+    screenshot: 'off',
   },
 };
 

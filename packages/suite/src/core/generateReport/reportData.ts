@@ -78,6 +78,8 @@ export interface StepReportItem {
   precondition?: string;
   order?: number;
   success?: boolean;
+  /** fn 执行前截图路径（goal-before，页面原始状态） */
+  goalScreenshotBefore?: string;
   /** 目标结果截图路径（keveGoal 执行后截图，来自 goalScreenshotPath / goalScreenshotAfter） */
   goalScreenshotPath?: string;
   /** 验证截图路径列表（agent 每步操作后截图，来自 verifyScreenshots / agentScreenshots） */
@@ -667,6 +669,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
           order: s.order,
           success: s.success,
           conclusion: s.conclusion,
+          goalScreenshotBefore: s.goalScreenshotBefore,
           goalScreenshotPath: s.goalScreenshotPath || s.goalScreenshotAfter,
           verifyScreenshots: s.verifyScreenshots || s.agentScreenshots,
           actions: (s.actions || []).map((a: any) => ({
