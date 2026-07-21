@@ -1,6 +1,6 @@
 {
   "name": "@kkeve/suite",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "AI-powered full-stack test agent CLI - static analysis, unit test, component test, E2E test, execute, evaluate, and report",
   "license": "MIT",
   "bin": {
@@ -63,6 +63,7 @@
   },
   "dependencies": {
     "@kkeve/core": "^0.0.4",
+    "@playwright/test": "*",
     "@vitest/coverage-v8": "^4.1.9",
     "@vue/test-utils": "^2.4.6",
     "chalk": "^4.1.0",
@@ -73,7 +74,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
     "@types/node": "^25.6.0",
     "tsx": "^4.19.0",
     "typescript": "^6.0.2"

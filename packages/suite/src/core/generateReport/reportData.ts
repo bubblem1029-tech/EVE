@@ -170,10 +170,14 @@ export interface CaseReportItem {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
+// 支持两种 caseId 格式：
+//   1. LLM 生成的 AG-01 / WW-01 / REG-01 等：「字母-数字」用 dash 分隔
+//   2. ktest 原始的 TCDPQA100195 / TCDPQA100189 等：「大写字母+数字」连续无分隔
+//      （ktest 命名规则：TC=TestCase DPQA=数据平台QA 100195=序列号）
 function parseCaseIdFromTitle(title: string): string | null {
-  const colonMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+):/);
-  const bracketMatch = title.match(/\[([A-Z]+(?:-[A-Z]+)*-\d+)\]/);
-  const spaceMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+)\s/);
+  const colonMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+):/);
+  const bracketMatch = title.match(/\[([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+)\]/);
+  const spaceMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+)\s/);
   return colonMatch?.[1] || bracketMatch?.[1] || spaceMatch?.[1] || null;
 }
 
@@ -493,7 +497,8 @@ function buildCaseResultMap(specs: PlaywrightSpec[], taskDir: string): Record<st
     const suitePathParts = spec.suitePath.split(' > ');
     const pwModuleTitle = suitePathParts.length >= 2 ? suitePathParts[suitePathParts.length - 1].trim() : suitePathParts[0].trim();
     // @keveModel title format: "${id}: ${description}" — extract module ID and description
-    const moduleIdMatch = pwModuleTitle.match(/^([A-Z]+(?:-[A-Z]+)*):\s*(.+)$/);
+    // 模块 ID 可能是字母格式（如 AG-01）或 ktest 纯数字格式（如 7473423）
+    const moduleIdMatch = pwModuleTitle.match(/^([A-Z]+(?:-[A-Z]+)*|\d+):\s*(.+)$/);
     const pwModuleId = moduleIdMatch?.[1] || '';
     const pwModuleDescription = moduleIdMatch?.[2] || pwModuleTitle;
 
@@ -655,7 +660,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
     // YAML enrichment (optional): priority, type, precondition, notes, steps
     const yamlCase = yamlCaseLookup[caseId];
     // Title: use result.title (Playwright spec.title) but strip ID prefix for display
-    const displayTitle = result.title.replace(/^[A-Z]+-\d+:\s*/, '').replace(/^\[[A-Z]+-\d+\]\s*/, '');
+    const displayTitle = result.title.replace(/^[A-Z]+-\d+:\s*|^[A-Z]+\d+:\s*/, '').replace(/^\[[A-Z]+-\d+\]\s*|^\[[A-Z]+\d+\]\s*/, '');
 
     const steps: StepReportItem[] = aiEntry?.steps
       ? aiEntry.steps.map((s: any) => {
