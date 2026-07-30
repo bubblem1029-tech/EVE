@@ -54,6 +54,8 @@ export interface KeveGoalCallOptions {
 type KeveFixture = {
   keveGoal: (options: KeveGoalCallOptions, fn?: () => Promise<void>) => Promise<void>;
   keveReadDoc: (url: string, options?: { noImages?: boolean; outputPath?: string }) => Promise<any>;
+  /** 将内置 testInfo 包装为可解构 fixture，允许脚本直接写 { page, keveGoal, testInfo } */
+  testInfo: import('@playwright/test').TestInfo;
 };
 
 // ─── Register Built-in Aspects ───────────────────────────────────────
@@ -77,6 +79,12 @@ keveAspect.register({
 // ─── Fixture ────────────────────────────────────────────────────────
 
 export const test = base.extend<KeveFixture>({
+  // ── 将内置 testInfo 包装为可解构 fixture ─────────────────────────
+  // 测试方法可直接写 { page, keveGoal, testInfo }，不再报 "unknown parameter" 错误
+  testInfo: async ({}, use, testInfo) => {
+    await use(testInfo);
+  },
+
   browser: async ({ }, use, testInfo) => {
     if (isCdpMode()) {
       const browser = await getCdpBrowser(); // 复用全局共享的 CDP browser
@@ -157,6 +165,7 @@ export const test = base.extend<KeveFixture>({
       const fnSource = fn?.toString() || undefined;
 
       let fnError: string | undefined;
+      let fnBlocked: boolean = false; // true when fn error is environment-blocked (skip agent Re-Act)
       if (fn) {
         try {
           await fn();
@@ -164,6 +173,13 @@ export const test = base.extend<KeveFixture>({
         } catch (err: any) {
           fnError = err?.message || String(err);
           console.log(`[keveGoal] "${options.step}" fn error: ${fnError}`);
+          // ── Detect environment-blocked errors: skip Agent Re-Act, directly BLOCKED ──
+          // When fn fails due to empty URL, connection refused, timeout, or navigation to invalid URL,
+          // Agent exploration cannot fix environment issues — waste of time and tokens.
+          fnBlocked = isEnvironmentBlockedError(err);
+          if (fnBlocked) {
+            console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — environment error detected, skipping agent Re-Act`);
+          }
         }
       }
 
@@ -175,11 +191,27 @@ export const test = base.extend<KeveFixture>({
         } catch { /* non-critical */ }
       }
 
-      // ── Hand off to agent: agent does Re-Act ──
+      // ── Hand off to agent: agent does Re-Act (OR shortcut to blocked if fnBlocked) ──
       const learnedHint = learnedActions.getHint(options.step);
       let reactResult: any;
       let reactTimedOut = false;
 
+      if (fnBlocked) {
+        // ── Shortcut: environment error detected in fn, skip Agent Re-Act entirely ──
+        // Agent exploration cannot fix empty URLs, connection refused, or navigation failures.
+        // Directly produce a blocked result with the fn error as explanation.
+        reactResult = {
+          expectedMet: false,
+          actions: [{
+            action: { tool: 'done', verdict: 'blocked', text: `Environment blocked: ${fnError}` },
+            toolOutput: '',
+            result: 'ok',
+          }],
+          finalSnapshot: '',
+          agentScreenshots: [],
+          conclusion: 'blocked',
+        };
+      } else {
       // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
       // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
       const GOAL_TIMEOUT_MS = 300_000;
@@ -221,6 +253,21 @@ export const test = base.extend<KeveFixture>({
       } finally {
         clearTimeout(goalTimeout);
       }
+      } // end of else (non-blocked path)
+
+      // ── Deterministic override: fn assertion failure cannot be overridden by Agent "pass" ──
+      // When fn has a hard assertion failure (Expected X, Received Y), the value mismatch
+      // is a fact, not a judgment. The Agent may rationalize "consistency" (e.g. "both pages
+      // show 15px, so consistent") and override to pass, but 15px ≠ 16px is a definitive failure.
+      // This is the per-goal equivalent of pipeline afterHook (case-gen-validate) —
+      // deterministic check > LLM judgment.
+      if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError)) {
+        console.log(`[keveGoal] ⚠️ "${options.step}" Agent said PASS but fn had assertion failure — overriding to FAIL`);
+        console.log(`[keveGoal]    fn assertion: ${fnError}`);
+        reactResult.expectedMet = false;
+        reactResult.conclusion = 'fail';
+      }
+
       result = {
         success: reactResult.expectedMet,
         actions: reactResult.actions,
@@ -228,8 +275,10 @@ export const test = base.extend<KeveFixture>({
         error: reactResult.expectedMet
           ? undefined
           : reactResult.conclusion === 'blocked'
-            ? new Error(`Blocked: ${reactTimedOut ? `Agent 超时 (${GOAL_TIMEOUT_MS}ms)` : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked')}`)
-            : new Error(`Expected not achieved: ${options.expected}`),
+            ? new Error(`Blocked: ${fnBlocked ? fnError : (reactTimedOut ? `Agent 超时 (300000ms)` : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked'))}`)
+            : (fnError && isAssertionFailure(fnError) && !fnBlocked)
+              ? new Error(`Assertion failed: ${fnError}`)
+              : new Error(`Expected not achieved: ${options.expected}`),
       } as any;
       // Attach Agent conclusion for downstream consumers
       if (reactResult.conclusion) (result as any).conclusion = reactResult.conclusion;
@@ -352,6 +401,121 @@ import { setKeveTest } from './keve-decorators';
 setKeveTest(test);
 
 // ── 辅助函数 ──
+
+/**
+ * Detect environment-blocked errors from fn execution.
+ *
+ * When fn (deterministic script) fails with these patterns, Agent Re-Act cannot
+ * fix the issue — the error is environmental, not application-level:
+ *
+ * 1. Empty/undefined URL → page.goto(''), page.goto(undefined)
+ * 2. Connection refused / net::ERR_CONNECTION_REFUSED
+ * 3. Navigation timeout (page not reachable)
+ * 4. Invalid URL format
+ * 5. SSO redirect / auth failure (not the app's fault)
+ *
+ * Returns true → keveGoal skips Agent Re-Act and directly reports BLOCKED
+ * with the fn error as the blocking reason.
+ */
+function isEnvironmentBlockedError(err: any): boolean {
+  const msg = (err?.message || String(err)).toLowerCase();
+
+  // Empty/undefined URL: page.goto('') or page.goto(undefined)
+  if (msg.includes('url must not be empty') || msg.includes('url is empty')
+    || msg.includes('invalid url') || msg.includes('url is undefined')
+    || msg.includes('navigation to ""') || msg.includes("navigation to ''")) {
+    return true;
+  }
+
+  // page.goto(undefined): Playwright type error "url: expected string, got undefined"
+  // This happens when process.env.PAGE_* is not set — environment config issue, not app issue
+  if ((msg.includes('expected string') || msg.includes('expected a string'))
+    && (msg.includes('got undefined') || msg.includes('got null') || msg.includes('received undefined'))) {
+    return true;
+  }
+
+  // Connection refused / network unreachable
+  if (msg.includes('err_connection_refused') || msg.includes('connection refused')
+    || msg.includes('net::err_connection') || msg.includes('err_name_not_resolved')
+    || msg.includes('err_address_unreachable') || msg.includes('err_internet_disconnected')
+    || msg.includes('err_connection_timed_out') || msg.includes('err_connection_reset')) {
+    return true;
+  }
+
+  // Navigation timeout (page not reachable in time)
+  if (msg.includes('navigation timeout of') || msg.includes('timeout of') && msg.includes('exceeded')
+    || msg.includes('page.goto: timeout') || msg.includes('navigating to') && msg.includes('timed out')) {
+    return true;
+  }
+
+  // Playwright locator/waitForSelector timeout — selector not found on page (fn script issue, not app crash)
+  // e.g. "Timeout 15000ms exceeded while waiting for locator('.selector') to be visible"
+  // This is a script-quality issue (wrong selector), not an env blocked error.
+  // Return false here — let Agent take over rather than treating as BLOCKED.
+  // Note: we intentionally do NOT return true; these should fall through to Agent Re-Act.
+
+  // IDC network segment restriction
+  if (msg.includes('unable to access on the idc network segment')
+    || msg.includes('idc network segment') || msg.includes('40314')) {
+    return true;
+  }
+
+  // SSO / auth redirect (not the app's fault)
+  if (msg.includes('sso redirect') || msg.includes('login redirect detected')
+    || msg.includes('err_too_many_redirects')) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Detect assertion failures from fn execution (Expected/Received patterns).
+ *
+ * When fn (deterministic script) throws a hard assertion failure with concrete
+ * Expected vs Received values, the mismatch is a *fact*, not a judgment.
+ * The Agent may rationalize "consistency" (e.g. "both pages show 15px → consistent → pass")
+ * and override to pass, but 15px ≠ 16px is a definitive failure.
+ *
+ * This function identifies such assertion failures so keveGoal can:
+ *   - Override Agent "pass" → "fail" when the fn proved a value mismatch
+ *   - Use the precise assertion message in the error (instead of generic "expected not achieved")
+ *
+ * Returns true for assertion errors, false for environment/runtime errors.
+ */
+function isAssertionFailure(error: string): boolean {
+  const msg = (error || '').toLowerCase();
+
+  // Exclude Playwright API type errors (parameter type mismatch, not value assertion)
+  // e.g. "page.goto: url: expected string, got undefined" — this is an env config error,
+  // not a functional assertion failure. isEnvironmentBlockedError() handles it instead.
+  if (msg.includes('expected string') || msg.includes('expected a string')
+    || msg.includes('expected number') || msg.includes('expected boolean')) {
+    // Only exclude if it looks like an API parameter error (not an assertion)
+    if (msg.includes('got undefined') || msg.includes('got null')
+      || msg.includes('received undefined') || msg.includes('received null')) {
+      return false;
+    }
+  }
+
+  // Jest/Vitest/playwright assertion: "Expected: X, Received: Y"
+  if (msg.includes('expected') && msg.includes('received')) return true;
+
+  // AssertionError / assert keyword
+  if (msg.includes('assertionerror') || msg.includes('assertion failed')
+    || msg.includes('assertion error')) return true;
+
+  // expect(x).toBe(y) / expect(x).toEqual(y) pattern
+  // Note: must NOT match Playwright timeout messages like "Timeout 15000ms exceeded waiting for locator(...) to be visible"
+  // Those are env/timeout errors, not value assertion failures.
+  if ((msg.includes(' to be ') && !msg.includes('timeout') && !msg.includes('waiting for') && !msg.includes('exceeded'))
+    || msg.includes(' to equal ') || msg.includes(' to deeply equal ')) return true;
+
+  // Playwright expect: "expected string, received number" etc.
+  if (msg.includes('expected ') && (msg.includes(' but ') || msg.includes(' got ') || msg.includes(' received '))) return true;
+
+  return false;
+}
 
 /**
  * 截图并保存到 test-artifacts，返回相对 taskDir 的路径

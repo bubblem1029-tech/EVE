@@ -147,11 +147,13 @@ export interface CaseReportItem {
   stdout: string;
   /** Playwright 步骤 */
   pwSteps: any[];
-  /** AI评估结论: "通过" | "不通过" | "待确认" */
+  /** AI评估结论: "通过" | "不通过" | "阻塞" | "跳过" */
   data: string;
   /** AI评估置信度 0-100 */
   confidence: number;
-  /** AI评估推理过程 */
+  /** AI评估 thought（原始推理/原因文本，用于根因展示） */
+  thought: string;
+  /** AI评估推理过程（同 thought，保持向后兼容） */
   confidenceReason: string;
   /** 步骤截图路径列表（前端按需加载，不再内嵌 base64） */
   stepScreenshots: { path: string }[];
@@ -539,7 +541,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
   const taskDir = path.resolve(path.dirname(TEST_RESULTS_JSON), '..', '..');
   const caseResultMap = buildCaseResultMap(specs, taskDir);
 
-  let total = 0, passed = 0, failed = 0, skipped = 0;
+  let total = 0;
   const caseResults: CaseReportItem[] = [];
   const confidenceDist = { '95-100': 0, '61-90': 0, '41-60': 0, '0-40': 0 };
 
@@ -621,9 +623,6 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
     total++;
     // Playwright returns "timedOut" for test timeout — treat as failed
     const effectiveStatus = result.status === 'timedOut' ? 'failed' : result.status;
-    if (effectiveStatus === 'passed') passed++;
-    else if (effectiveStatus === 'skipped') skipped++;
-    else failed++;
 
     // AI evaluation: match by Playwright title (scene.title, the canonical key)
     const aiEntry = aiConfidenceMap[result.title] || aiConfidenceMap[caseId];
@@ -758,6 +757,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
       stdout: result.stdout,
       data,
       confidence,
+      thought: aiEntry?.thought || (effectiveStatus === 'skipped' ? '用例被跳过（非自动执行）' : ''),
       confidenceReason,
       stepScreenshots: stepScreenshotsPaths,
       screenshotPath: result.screenshotPath,
@@ -774,7 +774,6 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
     for (const caseDef of mod.cases) {
       if (caseResultMap[caseDef.id]) continue; // Already included above
       total++;
-      failed++;
       // Missing cases: test was not executed by Playwright, so AI evaluation is skipped
       const data = '跳过';
       const confidence = 0;
@@ -798,6 +797,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
         stdout: '',
         data,
         confidence,
+        thought: 'YAML中定义但Playwright未执行',
         confidenceReason: 'YAML中定义但Playwright未执行，无AI评估数据',
         stepScreenshots: [],
         screenshotPath: '',
@@ -809,16 +809,16 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
     }
   }
 
-  const passRate = total > 0 ? ((passed / total) * 100).toFixed(1) : '0';
-
   const summaryJson = {
-    status: failed > 0 ? 'partial' : 'success',
+    status: 'partial',
     mr_id: testCasesData.mr_id, description: testCasesData.description,
     docs_url: testCasesData.docs_url,
     generated_at: new Date().toISOString().split('T')[0],
     round: currentRound,
     phases: { phase1: 'completed', phase2: 'completed', phase3: 'completed', phase4: 'completed' },
-    summary: { total, passed, failed, skipped, pending: 0, passRate: `${passRate}%` },
+    // passed/failed/skipped/passRate 已移至前端 computedSummary 实时计算
+    // 保留 total 供兜底展示
+    summary: { total, round: currentRound },
     confidenceDist: {
       '95-100%可信': confidenceDist['95-100'],
       '61-90%需分析': confidenceDist['61-90'],

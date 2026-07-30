@@ -265,6 +265,19 @@ export class KevePageAgent {
                         this.pushObservation(`Action "${actionName}" failed: ${execResult.error}. Try a different approach.`);
                     }
 
+                    // If execute_javascript returned a business-level rejection (❌ prefix),
+                    // re-inject the core rules so the LLM corrects its next attempt.
+                    if (actionName === 'execute_javascript' && execResult.output && execResult.output.startsWith('❌')) {
+                        const jsRulesHint = [
+                            'execute_javascript rules — fix your script:',
+                            '1. MUST start with `return` to capture the result.',
+                            '2. Use `var` for declarations — `const`/`let` cause SyntaxError.',
+                            '3. NO top-level `await` or `async () => {}` wrappers — they return undefined.',
+                            '4. NO Playwright APIs (`page`, `locator`) — only browser DOM APIs.',
+                        ].join('\n');
+                        this.pushObservation(jsRulesHint);
+                    }
+
                     // ── Check: if "done", capture done-time screenshot + return with test conclusion ──
                     if (actionName === 'done') {
                         // Capture done-time screenshot as goal-after evidence

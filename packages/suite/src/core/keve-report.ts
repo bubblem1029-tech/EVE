@@ -83,7 +83,7 @@ class KeveReporter implements Reporter {
     visual: 80,      // 视觉断言已评估，置信度较高
     'text-mismatch': 70, // UI文案格式不匹配（功能逻辑正确，文案措辞变了）
     assert: 50,      // Playwright 断言失败，需人工确认
-    'react-fail': 40, // AI 探索未达预期，需人工确认
+    incomplete: 0,   // 执行被中断（超时/action 耗尽），无法得出结论
     env: 0,          // 环境问题，测试结果不可信
     unknown: 0,       // 未知异常，无参考价值
   };
@@ -99,8 +99,18 @@ class KeveReporter implements Reporter {
     let classifiedMessage = '';
 
     if (result.status === 'skipped') {
-      skipAI = true;
-      effectiveCategory = 'unknown';
+      // 主动跳过（testInfo.skip，如"非自动执行"）— 独立处理，data='跳过'
+      this.appendRecord({
+        title: test.title,
+        data: '跳过',
+        confidence: 0,
+        thought: '用例被跳过（非自动执行）',
+        errorCategory: 'unknown' as ErrorCategory,
+        steps,
+        diagnosticHint: undefined,
+      });
+      console.log(`[keve-reporter] ${test.title}: SKIPPED`);
+      return;
     } else if (result.status === 'passed') {
       effectiveCategory = 'pass';
     } else if (agentConclusion) {
@@ -111,6 +121,9 @@ class KeveReporter implements Reporter {
         effectiveCategory = 'pass'; skipAI = true;
       } else if (agentConclusion.result === 'blocked') {
         effectiveCategory = 'env'; skipAI = true;
+      } else if (agentConclusion.result === 'incomplete') {
+        // Agent 执行被中断（超时/action 耗尽），无法得出结论
+        effectiveCategory = 'incomplete'; skipAI = true;
       } else {
         // Agent said fail → assert/text-mismatch depending on diagnostic hints
         const hint = buildDiagnosticHint(result.attachments);
@@ -142,9 +155,9 @@ class KeveReporter implements Reporter {
       else if (ENV_ERROR_PATTERNS.test(rawError.substring(0, 300))) {
         effectiveCategory = 'env'; skipAI = true;
       }
-      // 5. Re-Act loop 失败：AI 探索未达到预期（关键分类）
+      // 5. Re-Act loop 失败：执行被中断（action 耗尽 / 未达预期）→ incomplete
       else if (rawError.includes('Re-Act loop did not achieve') || rawError.includes('Expected not achieved after agent explore')) {
-        effectiveCategory = 'react-fail'; skipAI = false;
+        effectiveCategory = 'incomplete'; skipAI = true;
       }
       // 5.5 文案不匹配
       else if (rawError.includes('Expected not achieved')) {
@@ -152,7 +165,7 @@ class KeveReporter implements Reporter {
         if (hint && (hint.includes('实际显示') || hint.includes('页面实际'))) {
           effectiveCategory = 'text-mismatch'; skipAI = false;
         } else {
-          effectiveCategory = 'react-fail'; skipAI = false;
+          effectiveCategory = 'incomplete'; skipAI = true;
         }
       }
       // 6. 兜底
@@ -172,9 +185,13 @@ class KeveReporter implements Reporter {
               ? `无法分类的异常(${classifiedMessage})，跳过AI评估`
               : effectiveCategory === 'pass'
                 ? `Agent判定通过但fn脚本执行失败(${classifiedMessage})，脚本需修复`
-                : '用例被跳过';
-      // AI评估列显示"跳过"（表示AI未参与评估），而非"不通过"
-      const aiData = (effectiveCategory !== 'assert' && effectiveCategory !== 'react-fail' && effectiveCategory !== 'text-mismatch') ? '跳过' : '不通过';
+                : effectiveCategory === 'incomplete'
+                  ? `执行被中断(${classifiedMessage})，Agent未完成目标，建议重跑`
+                  : `无法分类的异常(${classifiedMessage})`;
+      // AI评估列输出：
+      // - assert/text-mismatch → "不通过"（有明确失败结论，skipAI=false）
+      // - 其余所有无法得出结论的 → "阻塞"（包括 incomplete/env/script/visual/pass/unknown）
+      const aiData = (effectiveCategory === 'assert' || effectiveCategory === 'text-mismatch') ? '不通过' : '阻塞';
       const keveScreenshots = parseKeveAsserts(result.attachments).map(ka => ka.label);
       this.appendRecord({
         title: test.title,
@@ -303,27 +320,30 @@ function parseSteps(attachments: TestResult['attachments']): StepResultAttachmen
 }
 
 /** Extract Agent conclusion (result + text) from keveGoalResult steps */
-function extractAgentConclusion(steps: StepResultAttachment[]): { result: 'pass' | 'fail' | 'blocked'; text: string } | undefined {
-  // Walk steps in reverse to find the most recent conclusion
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const step = steps[i];
-    // Step-level conclusion (from agent.ts buildResult → keveGoalResult attachment)
-    if (step.conclusion) {
-      // Find the done action text for context
-      const doneAction = step.actions?.find(a => a.tool === 'done');
-      return { result: step.conclusion, text: doneAction?.text || '' };
-    }
-    // Action-level conclusion (from done action's 'result' field)
-    if (step.actions) {
-      for (let j = step.actions.length - 1; j >= 0; j--) {
-        const action = step.actions[j];
-        if (action?.tool === 'done' && action?.conclusion) {
-          return { result: action.conclusion, text: action.text || '' };
-        }
+function extractAgentConclusion(steps: StepResultAttachment[]): { result: 'pass' | 'fail' | 'blocked' | 'incomplete'; text: string } | undefined {
+  if (steps.length === 0) return undefined;
+
+  // keveGoal 串行执行：取最后一步的结论作为用例整体结论
+  const lastStep = steps[steps.length - 1];
+
+  // 最后一步有明确结论（Agent 调用了 done）→ 直接使用
+  if (lastStep.conclusion) {
+    const doneAction = lastStep.actions?.find(a => a.tool === 'done');
+    return { result: lastStep.conclusion, text: doneAction?.text || '' };
+  }
+
+  // Action 级别结论兜底（来自 done action 的 result 字段）
+  if (lastStep.actions) {
+    for (let j = lastStep.actions.length - 1; j >= 0; j--) {
+      const action = lastStep.actions[j];
+      if (action?.tool === 'done' && action?.conclusion) {
+        return { result: action.conclusion, text: action.text || '' };
       }
     }
   }
-  return undefined;
+
+  // 最后一步无任何结论 → 执行被中断（超时 / action 耗尽）
+  return { result: 'incomplete', text: '执行被中断，Agent未完成目标' };
 }
 
 /** Build diagnosticHint from keveGoalResult attachments (primary) + fallback to keveDiagnosticHint */

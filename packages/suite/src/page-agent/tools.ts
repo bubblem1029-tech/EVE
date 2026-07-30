@@ -150,8 +150,20 @@ tools.set('navigate', tool({
     }),
     execute: async function (this: KevePageAgent, input) {
         let url = input.url;
+        // ── Resolve environment variable references (e.g., "process.env.PAGE_BI") ──
+        const envRefMatch = url.match(/^process\.env\.(\w+)$/);
+        if (envRefMatch) {
+            const envValue = process.env[envRefMatch[1]] || '';
+            if (!envValue) {
+                return `❌ Cannot navigate: environment variable ${envRefMatch[1]} is empty/undefined. This is a test data configuration issue — call done(verdict="blocked") immediately.`;
+            }
+            url = envValue;
+        }
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
             const base = process.env.KEVE_TARGET_URL || process.env.BASE_URL || '';
+            if (!base) {
+                return `❌ Cannot navigate: no base URL available (KEVE_TARGET_URL and BASE_URL are both empty). Call done(verdict="blocked") immediately.`;
+            }
             url = new URL(url, base).href;
         }
         await this.page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
@@ -161,9 +173,9 @@ tools.set('navigate', tool({
 
 // --- execute_javascript ---
 tools.set('execute_javascript', tool({
-    description: 'READ-ONLY query tool: execute JavaScript in the BROWSER DOM context to retrieve precise values that screenshots and accessibility trees CANNOT provide — such as computed CSS styles (getComputedStyle), DOM measurements (offsetWidth, getBoundingClientRect), or element properties (checked, disabled, value).\n\n⚠️ EXECUTION CONTEXT: This runs inside the browser page via page.evaluate — it is a plain browser JavaScript sandbox. There is NO `page` object, NO Playwright API, NO `locator`, NO top-level `await`. Using `page.locator(...)`, `page.evaluate(...)`, `await`, or `async () => {}` wrappers will cause SyntaxError or return undefined.\n\nDo NOT use for: clicking, typing, navigating, form filling, or any page interaction — use click/type/navigate tools instead. Do NOT use for: assertions or logical checks — just return the raw value, you judge the result yourself. Do NOT use for: modifying page state (setting styles, cookies, localStorage, DOM mutations).',
+    description: 'READ-ONLY query tool: execute JavaScript in the BROWSER DOM context to retrieve precise values that screenshots and accessibility trees CANNOT provide — such as computed CSS styles (getComputedStyle), DOM measurements (offsetWidth, getBoundingClientRect), or element properties (checked, disabled, value).\n\nThis tool is STRICTLY READ-ONLY. You MUST NOT modify the page under test — you are a TESTER who observes and reports, never an editor who alters. If the actual value differs from expected, report it as fail; do NOT override styles/DOM to make it match.\n\n<rule>\n1. Script MUST start with `return` to capture the result. No auto-wrapping — if you omit `return`, execution is rejected.\n2. Use `var` for variable declarations. `const`/`let` cause SyntaxError in page.evaluate context.\n3. NO top-level `await` — the script runs in a synchronous IIFE inside page.evaluate. There is no async context.\n4. NO `async () => {}` wrappers — they return undefined. Write flat statements ending with `return`.\n5. NO Playwright APIs (`page`, `locator`, `expect`) — only browser DOM APIs exist inside the page.\n6. STRICTLY READ-ONLY: do NOT modify DOM, styles, cookies, or localStorage. This includes style.setProperty(), style.removeProperty(), className changes, setAttribute, and any DOM mutation. All write APIs are BLOCKED at execution level. Only query/return values.\n</rule>\n\nDo NOT use for: clicking, typing, navigating, form filling, or any page interaction — use click/type/navigate tools instead. Do NOT use for: assertions or logical checks — just return the raw value, you judge the result yourself.',
     inputSchema: z.object({
-        script: z.string().describe("JavaScript code to execute inside the browser DOM. MUST start with `return` to capture the result. Use `var` for variable declarations (NOT `const`/`let` — they cause SyntaxError in some evaluate contexts). Only browser DOM APIs: document.querySelector, window.getComputedStyle, etc.\n\n✅ Correct: 'return document.querySelector(\".x\").innerText'\n✅ Correct: 'var el = document.querySelector(\".x\"); return window.getComputedStyle(el).backgroundColor'\n❌ Wrong: 'page.locator(\".x\")' — no Playwright `page` object in browser context\n❌ Wrong: 'await page.locator(...)' — no `await` or `async`\n❌ Wrong: 'const el = ...' — use `var` instead of `const`/`let`\n❌ Wrong: 'async () => { ... }' — do NOT wrap in async function, returns undefined\n\nRead-only queries only."),
+        script: z.string().describe("JavaScript to execute in browser DOM. <rule> MUST start with `return`. Use `var` (not `const`/`let`). No top-level `await` or `async` wrappers. No Playwright APIs. STRICTLY READ-ONLY — no style.setProperty, no DOM mutation. </rule>\n\n✅ 'return document.querySelector(\".x\").innerText'\n✅ 'var el = document.querySelector(\".x\"); return window.getComputedStyle(el).backgroundColor'\n❌ 'page.locator(\".x\")' — no page object\n❌ 'await page.locator(...)' — no await\n❌ 'const el = ...' — use var\n❌ 'async () => { ... }' — returns undefined\n❌ 'document.documentElement.style.setProperty(...)' — WRITE, use getComputedStyle instead"),
     }),
     execute: async function (this: KevePageAgent, input) {
         try {
@@ -186,11 +198,15 @@ tools.set('execute_javascript', tool({
             }
 
             // Read-only guard: block DOM mutation APIs to prevent Agent from altering page state.
+            // CRITICAL: E2E testing must OBSERVE and REPORT the actual page state.
+            // Never modify the page under test to make assertions pass.
             const writePatterns = [
                 /\b(?:document|element|el|node)\.\s*(?:remove|appendChild|insertBefore|replaceChild|removeChild|appendChild)\s*\(/,
                 /\b(?:document|element|el|node)\.\s*(?:innerHTML|outerHTML|textContent|innerText)\s*=/,
                 /\b(?:document|element|el|node)\.\s*(?:setAttribute|removeAttribute|classList)\s*\./,
                 /\b\.style\s*\.\s*\w+\s*=/,
+                /\b\.style\s*\.\s*(?:setProperty|removeProperty)\s*\(/,
+                /\b(?:document|element|el|node)\.\s*className\s*=/,
                 /\blocation\s*(?:\.href\s*=|\.assign\s*\(|\.replace\s*\()/,
                 /\bwindow\s*\.\s*(?:close|stop|open)\s*\(/,
                 /\bdocument\.\s*(?:write|writeln|execCommand)\s*\(/,

@@ -16,7 +16,7 @@ export interface KeveGoalMeta {
 }
 
 /** 错误分类类型 */
-export type ErrorCategory = 'script' | 'env' | 'assert' | 'visual' | 'text-mismatch' | 'react-fail' | 'pass' | 'unknown';
+export type ErrorCategory = 'script' | 'env' | 'assert' | 'visual' | 'text-mismatch' | 'incomplete' | 'pass' | 'unknown';
 
 /** 场景执行后的评估元数据，由 @keveScene 装饰器写入，Reporter 读取 */
 export interface KeveEvalMeta {
