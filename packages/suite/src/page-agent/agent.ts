@@ -94,6 +94,95 @@ export interface AgentOptions {
     fnAfterScreenshot?: string;
 }
 
+// ─── Snapshot diff helpers (used by assembleUserPrompt to add Page Change to history) ───
+
+/** Find the snapshot string of the previous step event before index `i`. */
+function findPrevStepSnapshot(events: any[], currentIdx: number): string | undefined {
+    for (let j = currentIdx - 1; j >= 0; j--) {
+        if (events[j].type === 'step' && events[j].snapshot) return events[j].snapshot;
+    }
+    return undefined;
+}
+
+/**
+ * Summarize key differences between two a11y snapshots.
+ * Returns a short human-readable string or '' if nothing notable changed.
+ *
+ * Detects: dialog/modal appearance/disappearance, new/removed elements,
+ * value changes in inputs, and repeated identical snapshots (no change).
+ */
+function summarizeSnapshotDiff(prev: string, curr: string): string {
+    if (prev === curr) return 'no visible change on page';
+
+    const prevLines = prev.split('\n');
+    const currLines = curr.split('\n');
+
+    const changes: string[] = [];
+
+    // 1. Detect dialog/modal appearance or disappearance
+    const prevDialogs = prevLines.filter(l => /dialog|modal|alertdialog/i.test(l) && /\[ref=/.test(l));
+    const currDialogs = currLines.filter(l => /dialog|modal|alertdialog/i.test(l) && /\[ref=/.test(l));
+    if (currDialogs.length > prevDialogs.length) {
+        const newDialog = currDialogs.find(cd => !prevDialogs.some(pd => pd === cd));
+        if (newDialog) {
+            const nameMatch = newDialog.match(/"([^"]+)"/);
+            changes.push(`dialog "${nameMatch?.[1] || '?'}" appeared`);
+        }
+    } else if (currDialogs.length < prevDialogs.length) {
+        changes.push('dialog closed');
+    }
+
+    // 2. Detect new warning/error text nodes (e.g. validation errors)
+    const prevWarnings = prevLines.filter(l => /warning|error|alert|⚠|❌/i.test(l) && /\[ref=/.test(l));
+    const currWarnings = currLines.filter(l => /warning|error|alert|⚠|❌/i.test(l) && /\[ref=/.test(l));
+    for (const w of currWarnings) {
+        if (!prevWarnings.some(pw => pw === w)) {
+            const textMatch = w.match(/"([^"]+)"/);
+            changes.push(`new warning/error: "${textMatch?.[1] || '?'}"`);
+        }
+    }
+
+    // 3. Count added/removed interactive elements (simplified: lines with [ref=])
+    const prevRefs = new Set(prevLines.filter(l => /\[ref=/.test(l)).map(l => {
+        const m = l.match(/\[ref=([a-f0-9]+)\]/);
+        return m?.[1] || '';
+    }));
+    const currRefs = new Set(currLines.filter(l => /\[ref=/.test(l)).map(l => {
+        const m = l.match(/\[ref=([a-f0-9]+)\]/);
+        return m?.[1] || '';
+    }));
+    const added = [...currRefs].filter(r => r && !prevRefs.has(r));
+    const removed = [...prevRefs].filter(r => r && !currRefs.has(r));
+    if (added.length > 0) changes.push(`${added.length} new element(s) appeared`);
+    if (removed.length > 0) changes.push(`${removed.length} element(s) removed`);
+
+    // 4. Detect value changes in textboxes (content after colon on same line)
+    const prevValues = new Map<string, string>();
+    for (const l of prevLines) {
+        const refM = l.match(/\[ref=([a-f0-9]+)\]/);
+        if (refM) {
+            // Value is text after the last colon on the same line
+            const valM = l.match(/: (.+)$/);
+            if (valM) prevValues.set(refM[1], valM[1].trim());
+        }
+    }
+    for (const l of currLines) {
+        const refM = l.match(/\[ref=([a-f0-9]+)\]/);
+        if (refM) {
+            const valM = l.match(/: (.+)$/);
+            if (valM && prevValues.has(refM[1])) {
+                const prevVal = prevValues.get(refM[1])!;
+                const currVal = valM[1].trim();
+                if (prevVal !== currVal && currVal) {
+                    changes.push(`[ref=${refM[1]}] value changed: "${prevVal}" → "${currVal}"`);
+                }
+            }
+        }
+    }
+
+    return changes.length > 0 ? changes.join('; ') : 'page content changed';
+}
+
 // ─── KevePageAgent ──────────────────────────────────────────────────────
 
 export class KevePageAgent {
@@ -159,7 +248,7 @@ export class KevePageAgent {
             this.pushObservation(`Target application URL: ${targetUrl}. Use this URL for navigation. Do NOT construct URLs yourself — use the navigate tool with this URL or read process.env.KEVE_TARGET_URL.`);
         }
         if (options?.learnedActionsHint) {
-            this.pushObservation(`Previous discoveries for similar steps:\n${options.learnedActionsHint}`);
+            this.pushObservation(`Previous discoveries for similar steps:\n${options.learnedActionsHint}\nUse these discoveries to avoid repeating failed approaches. If a previous step found a working way to fill a form field (especially combobox/dropdown), reuse that approach instead of trial-and-error.`);
         }
 
         // Step limit warning
@@ -270,10 +359,12 @@ export class KevePageAgent {
                     if (actionName === 'execute_javascript' && execResult.output && execResult.output.startsWith('❌')) {
                         const jsRulesHint = [
                             'execute_javascript rules — fix your script:',
-                            '1. MUST start with `return` to capture the result.',
-                            '2. Use `var` for declarations — `const`/`let` cause SyntaxError.',
+                            '1. Include `return` for multi-statement code. Single expressions are auto-wrapped.',
+                            '2. const/let are auto-converted to var — no need to write var manually.',
                             '3. NO top-level `await` or `async () => {}` wrappers — they return undefined.',
                             '4. NO Playwright APIs (`page`, `locator`) — only browser DOM APIs.',
+                            '5. FORM INTERACTION allowed: input.value=, dispatchEvent().',
+                            '6. FORBIDDEN: style mutation (style.xxx=, style.setProperty), classList mutation, className=, innerHTML=.',
                         ].join('\n');
                         this.pushObservation(jsRulesHint);
                     }
@@ -350,6 +441,56 @@ export class KevePageAgent {
                 }
 
                 stepCount++;
+
+                // ── Stuck detection: break retry loops early ──
+                // When the last 3 steps produce identical toolOutput (no page progress),
+                // inject a forceful observation to break the loop.
+                // Also detects oscillation patterns (e.g. A→B→A→B cycling between two states).
+                const recentSteps = this.events
+                    .filter((e): e is AgentStepEvent => e.type === 'step')
+                    .slice(-4);
+                if (recentSteps.length >= 3) {
+                    const last3 = recentSteps.slice(-3);
+                    const normalize = (s: string) => (s || '').replace(/executed for \d+ms/, '').slice(0, 80);
+                    const outputs = last3.map(s => normalize(s.toolOutput));
+                    const allSame = outputs.every(o => o === outputs[0]);
+                    if (allSame) {
+                        const stuckMsg = [
+                            `⚠️ STUCK DETECTED: The last 3 actions all produced the same result: "${outputs[0].slice(0, 60)}"`,
+                            `This means the page is NOT responding to your actions. You MUST change strategy:`,
+                            `- Try a different tool (e.g. select_option instead of fill_form, execute_javascript instead of click)`,
+                            `- Try a different element or value`,
+                            `- If a dialog blocks submission, handle the sub-dialog/popup first or dismiss it with Escape`,
+                            `- If stuck after 2 more attempts: call done(verdict="fail") honestly`,
+                        ].join('\n');
+                        this.pushObservation(stuckMsg);
+                    }
+
+                    // ── Oscillation detection: check if last 6 steps cycle between 2-3 states ──
+                    // E.g. click确定→ownership popup → click返回→conflict warning → click确定→ownership popup
+                    const recent6 = this.events
+                        .filter((e): e is AgentStepEvent => e.type === 'step')
+                        .slice(-6);
+                    if (recent6.length >= 5 && !allSame) {
+                        const norm6 = recent6.map(s => normalize(s.toolOutput));
+                        // Extract the set of unique outputs (ignoring minor variations)
+                        const uniqueOutputs = [...new Set(norm6)];
+                        if (uniqueOutputs.length <= 2) {
+                            // All recent steps cycle between ≤2 distinct outputs → oscillation
+                            const oscMsg = [
+                                `⚠️ OSCILLATION DETECTED: The last ${recent6.length} actions cycle between ${uniqueOutputs.length} states without progress:`,
+                                ...uniqueOutputs.map(o => `  - "${o.slice(0, 50)}"`),
+                                `You are going back and forth without advancing. You MUST break the cycle:`,
+                                `- If clicking 确定 triggers a repeated warning, change the FORM VALUES (not just the name) to resolve the warning`,
+                                `- If "口径重复" blocks submission, change the DATASET or INDICATOR (not just the indicator name)`,
+                                `- If a sub-dialog keeps appearing, dismiss it with Escape or handle it first`,
+                                `- Call done(verdict="fail") honestly if the conflict cannot be resolved within current steps`,
+                            ].join('\n');
+                            this.pushObservation(oscMsg);
+                        }
+                    }
+                }
+
                 if (stepCount >= maxSteps) {
                     console.error(`\x1b[31mStep count exceeded maximum limit (${maxSteps})\x1b[0m`);
                     const finalSnapshot = await this.page.ariaSnapshot();
@@ -424,13 +565,20 @@ export class KevePageAgent {
 
         // <agent_history>
         prompt += '<agent_history>\n';
-        for (const event of this.events) {
+        for (let i = 0; i < this.events.length; i++) {
+            const event = this.events[i];
             if (event.type === 'step') {
                 prompt += `<step_${event.stepIndex + 1}>\n`;
                 prompt += `Evaluation of Previous Step: ${event.evaluation}\n`;
                 prompt += `Memory: ${event.memory}\n`;
                 prompt += `Next Goal: ${event.nextGoal}\n`;
                 prompt += `Action: ${event.toolName} → ${event.toolOutput || event.toolError || 'unknown'}\n`;
+                // Add snapshot diff summary: compare this step's snapshot with the previous step's
+                const prevStep = i > 0 ? findPrevStepSnapshot(this.events, i) : undefined;
+                if (prevStep !== undefined) {
+                    const diff = summarizeSnapshotDiff(prevStep, event.snapshot);
+                    if (diff) prompt += `Page Change: ${diff}\n`;
+                }
                 prompt += `</step_${event.stepIndex + 1}>\n`;
             } else if (event.type === 'observation') {
                 prompt += `<sys>${event.content}</sys>\n`;
@@ -575,6 +723,58 @@ IMPORTANT: Respond in Chinese.`,
             return { found: false, analysis: parsed.analysis || 'LLM returned invalid bbox' };
         } catch (e: any) {
             return { found: false, analysis: `LLM invoke error: ${e.message}` };
+        }
+    }
+
+    /** Visual assertion: check a visual condition without interacting with the page */
+    async visualAssertElement(
+        screenshotBase64: string,
+        assertion: string,
+    ): Promise<{ passed: boolean; reasoning: string }> {
+        const assertToolSchema = z.object({
+            passed: z.boolean().describe('Whether the assertion is true based on the screenshot'),
+            reasoning: z.string().describe('Brief explanation of why the assertion passed or failed'),
+        });
+
+        const messages: Message[] = [
+            {
+                role: 'system',
+                content: `You are a UI visual assertion checker. Given a screenshot and an assertion statement, determine whether the assertion is TRUE based on what you see.
+
+Output JSON with:
+- passed: true if the assertion holds, false otherwise
+- reasoning: brief explanation of your judgment
+
+IMPORTANT:
+- Only judge what you can SEE in the screenshot — do not infer hidden states
+- Be strict: if the visual evidence is ambiguous, return passed=false
+- Respond in Chinese for reasoning`,
+            },
+            {
+                role: 'user',
+                content: [
+                    { type: 'text', text: `请判断以下断言是否为真：${assertion}\n\n返回 passed (布尔值) 和 reasoning (中文说明)。` },
+                    { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotBase64}`, detail: 'high' } },
+                ] as ContentItem[],
+            },
+        ];
+
+        try {
+            const result = await this.llm.invoke(messages, {
+                AssertResult: {
+                    description: 'Return the visual assertion result',
+                    inputSchema: assertToolSchema,
+                    execute: async (args: any) => args,
+                },
+            }, this.abortController.signal, { toolChoiceName: 'AssertResult' });
+
+            const parsed = result.toolCall.args as { passed: boolean; reasoning: string };
+            return {
+                passed: typeof parsed.passed === 'boolean' ? parsed.passed : false,
+                reasoning: parsed.reasoning || 'No reasoning provided',
+            };
+        } catch (e: any) {
+            return { passed: false, reasoning: `LLM invoke error: ${e.message}` };
         }
     }
 

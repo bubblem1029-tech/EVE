@@ -69,8 +69,9 @@ keveAspect.register({
   phase: 'after',
   order: 20,
   async execute(ctx: GoalContext, result?: GoalResult): Promise<GoalResult | void> {
-    if (!result?.actions?.length || !result.success) return;
-    learnedActions.add(ctx.step, result.actions as any[]);
+    if (!result?.actions?.length) return;
+    const url = ctx.page.url();
+    learnedActions.add(ctx.step, result.actions as any[], url, result.success);
   },
 });
 
@@ -192,7 +193,8 @@ export const test = base.extend<KeveFixture>({
       }
 
       // ── Hand off to agent: agent does Re-Act (OR shortcut to blocked if fnBlocked) ──
-      const learnedHint = learnedActions.getHint(options.step);
+      const currentUrl = page.url();
+      const learnedHint = learnedActions.getHint(options.step, currentUrl);
       let reactResult: any;
       let reactTimedOut = false;
 
