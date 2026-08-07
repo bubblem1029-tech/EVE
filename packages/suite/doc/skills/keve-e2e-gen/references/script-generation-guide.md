@@ -51,6 +51,7 @@
 > 2. **绝不硬编码等待时间**：不使用 `waitForTimeout()`，通过 POM waitForReady 或断言等待
 > 3. **绝不硬编码环境数据**（D05）：ID/配置值从 `fixtures/test-data.ts` 导入
 > 4. **每个测试覆盖恰好一个排列**：测试体内无 if/else 分支逻辑
+> 5. **绝不使用 `waitForLoadState('networkidle')`**：BI 仪表盘等页面有 WebSocket/SSE/长轮询等持久连接，`networkidle` 永远不会 resolve 导致无限挂起。使用 `waitForLoadState('domcontentloaded')` 或 `page.goto(url, { waitUntil: 'domcontentloaded' })` 代替
 
 ### 正确模式 vs 禁止模式
 
@@ -64,6 +65,16 @@ await expect(page.locator('[data-e2e-name="智能应用列表-筛选区域"]')).
 await page.locator('.filter-area').click();
 await page.waitForTimeout(5000);
 await agentDetailPage.navigate(636, 'edit');
+
+// ❌ 禁止：waitForLoadState('networkidle') — BI 页面有持久连接会无限挂起
+await page.goto(url);
+await page.waitForLoadState('networkidle');  // ← 永远不会 resolve！
+
+// ✅ 正确：使用 domcontentloaded 替代
+await page.goto(url, { waitUntil: 'domcontentloaded' });
+// 或
+await page.goto(url);
+await page.waitForLoadState('domcontentloaded');
 ```
 
 ### fixtures/test-data.ts 结构

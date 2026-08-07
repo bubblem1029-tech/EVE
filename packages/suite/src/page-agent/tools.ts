@@ -482,7 +482,7 @@ tools.set('navigate', tool({
             }
             url = new URL(url, base).href;
         }
-        await this.page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
+        await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         return `✅ Navigated to ${url}`;
     },
 }));
@@ -738,6 +738,320 @@ tools.set('fill_form', tool({
         }
 
         return results.join('\n');
+    },
+}));
+
+// --- drag ---
+tools.set('drag', tool({
+    description: `Drag from a starting point to an ending point using real mouse events (mousedown → mousemove steps → mouseup). Use for: resizing elements via drag handles, drag-to-reorder lists, any UI requiring hold+move interaction.
+
+Two targeting modes:
+1. By ref — drags from the element's center (use for drag-to-reorder)
+2. By coordinates (startX/startY) — precise point (use for resize handles found via visual_locate)
+
+Target specification:
+- Relative: use deltaX/deltaY (e.g. deltaX=200 moves 200px right)
+- Absolute: use endX/endY (e.g. endX=800, endY=400)
+
+NOT for: scrolling (use scroll), clicking (use click), HTML5 DnD between elements.`,
+    inputSchema: z.object({
+        ref: z.string().optional()
+            .describe('Element ref to start dragging from. Drags from element center. Use startX/startY for resize handles.'),
+        startX: z.number().optional()
+            .describe('X coordinate to start dragging from (viewport pixels). Use when you have precise coordinates from visual_locate.'),
+        startY: z.number().optional()
+            .describe('Y coordinate to start dragging from (viewport pixels).'),
+        deltaX: z.number().optional()
+            .describe('Horizontal displacement in pixels. Positive=right, negative=left. Use with ref or startX/startY.'),
+        deltaY: z.number().optional()
+            .describe('Vertical displacement in pixels. Positive=down, negative=up.'),
+        endX: z.number().optional()
+            .describe('Absolute X coordinate to drag to (viewport pixels). Use deltaX/deltaY for relative, endX/endY for absolute.'),
+        endY: z.number().optional()
+            .describe('Absolute Y coordinate to drag to (viewport pixels).'),
+        steps: z.number().min(1).max(100).default(10)
+            .describe('Number of intermediate mousemove steps. More=smoother animation. Default 10. Use 20+ for CSS resize.'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        // 1. Determine start coordinates
+        let sx: number, sy: number;
+        if (input.ref) {
+            const locator = this.page.locator(`aria-ref=${input.ref}`);
+            try {
+                const box = await locator.boundingBox({ timeout: 5000 });
+                if (!box) return `❌ Cannot drag: element [ref=${input.ref}] not visible or detached`;
+                sx = box.x + box.width / 2;
+                sy = box.y + box.height / 2;
+            } catch (err: any) {
+                return `❌ Cannot drag: element [ref=${input.ref}] error: ${err.message}`;
+            }
+        } else if (input.startX !== undefined && input.startY !== undefined) {
+            sx = input.startX;
+            sy = input.startY;
+        } else {
+            return `❌ Cannot drag: provide either ref or startX/startY`;
+        }
+
+        // 2. Determine end coordinates
+        let ex: number, ey: number;
+        if (input.endX !== undefined && input.endY !== undefined) {
+            ex = input.endX;
+            ey = input.endY;
+        } else if (input.deltaX !== undefined || input.deltaY !== undefined) {
+            ex = sx + (input.deltaX || 0);
+            ey = sy + (input.deltaY || 0);
+        } else {
+            return `❌ Cannot drag: provide either deltaX/deltaY or endX/endY`;
+        }
+
+        // 3. Execute real mouse drag with intermediate steps
+        const steps = input.steps ?? 10;
+        try {
+            await this.page.mouse.move(sx, sy);
+            await this.page.mouse.down();
+            for (let i = 1; i <= steps; i++) {
+                const progress = i / steps;
+                await this.page.mouse.move(
+                    sx + (ex - sx) * progress,
+                    sy + (ey - sy) * progress,
+                );
+                await this.page.waitForTimeout(16); // ~60fps
+            }
+            await this.page.mouse.up();
+            await this.page.waitForTimeout(300); // wait for resize/layout to settle
+
+            return `✅ Dragged from (${Math.round(sx)}, ${Math.round(sy)}) to (${Math.round(ex)}, ${Math.round(ey)}) in ${steps} steps (Δx=${Math.round(ex - sx)}, Δy=${Math.round(ey - sy)})`;
+        } catch (err: any) {
+            try { await this.page.mouse.up(); } catch { /* ensure mouse released */ }
+            return `❌ Drag failed: ${err.message}`;
+        }
+    },
+}));
+
+// --- wait_for ---
+tools.set('wait_for', tool({
+    description: `Wait for text to appear or disappear on the page, or for a specified duration. More efficient than polling with wait(time).
+
+- waitForText: wait until specific text becomes visible on the page (e.g. wait for "保存成功" toast)
+- waitForTextGone: wait until specific text disappears (e.g. wait for "加载中..." spinner to vanish)
+- seconds: simple time-based wait (max 30s)
+
+At least one parameter is required. You can combine them (e.g. wait for text + timeout).`,
+    inputSchema: z.object({
+        waitForText: z.string().optional()
+            .describe('Wait for this text to appear on the page (visible)'),
+        waitForTextGone: z.string().optional()
+            .describe('Wait for this text to disappear from the page (hidden)'),
+        seconds: z.number().min(0.1).max(30).optional()
+            .describe('Wait time in seconds (max 30)'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        if (!input.waitForText && !input.waitForTextGone && !input.seconds) {
+            return `❌ wait_for: provide at least one of waitForText, waitForTextGone, or seconds`;
+        }
+
+        const results: string[] = [];
+
+        if (input.seconds) {
+            await this.page.waitForTimeout(input.seconds * 1000);
+            results.push(`waited ${input.seconds}s`);
+        }
+
+        if (input.waitForTextGone) {
+            const locator = this.page.getByText(input.waitForTextGone).first();
+            try {
+                await locator.waitFor({ state: 'hidden', timeout: 15000 });
+                results.push(`"${input.waitForTextGone}" disappeared`);
+            } catch {
+                results.push(`⚠️ "${input.waitForTextGone}" still visible after 15s`);
+            }
+        }
+
+        if (input.waitForText) {
+            const locator = this.page.getByText(input.waitForText).first();
+            try {
+                await locator.waitFor({ state: 'visible', timeout: 15000 });
+                results.push(`"${input.waitForText}" appeared`);
+            } catch {
+                results.push(`⚠️ "${input.waitForText}" not found after 15s`);
+            }
+        }
+
+        return `✅ ${results.join(', ')}`;
+    },
+}));
+
+// --- verify_value ---
+tools.set('verify_value', tool({
+    description: `Deterministically verify a form element's current value — no LLM needed. Faster and more precise than visual_assert for value checks.
+
+- textbox/slider/combobox → checks locator.inputValue()
+- checkbox/radio → checks locator.isChecked()
+
+Returns ✅ if value matches, ❌ if mismatch. Use for precise value assertions instead of visual inspection.`,
+    inputSchema: z.object({
+        ref: z.string().describe('Element ref from the accessibility tree'),
+        type: z.enum(['textbox', 'checkbox', 'radio', 'combobox', 'slider'])
+            .describe('Element type: textbox/slider/combobox → check inputValue; checkbox/radio → check isChecked'),
+        value: z.string().describe('Expected value. For checkbox/radio: "true" or "false". For textbox: expected text. For combobox: expected selected value.'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        const locator = this.page.locator(`aria-ref=${input.ref}`);
+        try {
+            if (input.type === 'checkbox' || input.type === 'radio') {
+                const checked = await locator.isChecked({ timeout: 5000 });
+                const expected = input.value === 'true';
+                if (checked === expected) {
+                    return `✅ Verify [ref=${input.ref}] ${input.type}: checked=${checked} (expected ${input.value})`;
+                }
+                return `❌ Verify [ref=${input.ref}] ${input.type}: checked=${checked} (expected ${input.value})`;
+            }
+
+            // textbox, slider, combobox — check inputValue
+            const actualValue = await locator.inputValue({ timeout: 5000 });
+            if (actualValue === input.value) {
+                return `✅ Verify [ref=${input.ref}] ${input.type}: value="${actualValue}" (expected "${input.value}")`;
+            }
+
+            // For combobox, also check textContent (custom components may not expose value via inputValue)
+            if (input.type === 'combobox') {
+                const textContent = await locator.textContent({ timeout: 2000 }).catch(() => '');
+                if (textContent?.includes(input.value)) {
+                    return `✅ Verify [ref=${input.ref}] combobox: text contains "${input.value}" (inputValue="${actualValue}")`;
+                }
+            }
+
+            return `❌ Verify [ref=${input.ref}] ${input.type}: value="${actualValue}" (expected "${input.value}")`;
+        } catch (err: any) {
+            return `❌ Verify [ref=${input.ref}] failed: ${err.message}`;
+        }
+    },
+}));
+
+// --- handle_dialog ---
+tools.set('handle_dialog', tool({
+    description: `Handle native browser dialogs (alert, confirm, prompt). Native dialogs are auto-accepted by default when they appear.
+
+Two usage modes:
+1. BEFORE a dialog-triggering action: call handle_dialog(accept=false) to override the default auto-accept behavior. Then click the button that triggers the dialog.
+2. AFTER a dialog appeared: call handle_dialog to check what dialog was captured and how it was handled.
+
+Native dialogs are auto-accepted unless you pre-set a different action. If a click triggers a dialog, it will be handled automatically based on your pre-set preference.`,
+    inputSchema: z.object({
+        accept: z.boolean().default(true).describe('Whether to accept (true) or dismiss (false) the next native dialog. Default true.'),
+        promptText: z.string().optional().describe('Text to enter in prompt dialog (only when accept=true and dialog is a prompt)'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        // Set handler for the NEXT dialog
+        this._dialogHandler = { accept: input.accept, promptText: input.promptText };
+
+        // Also report the last captured dialog (if any)
+        const last = this._lastDialogInfo;
+        if (last) {
+            return `Last dialog: [${last.type}] "${last.message.slice(0, 80)}" — was ${last.accepted ? 'accepted' : 'dismissed'}. Next dialog will be ${input.accept ? 'accepted' : 'dismissed'}.`;
+        }
+
+        return `Next native dialog will be ${input.accept ? 'accepted' : 'dismissed'}${input.promptText ? ` with text "${input.promptText}"` : ''}.`;
+    },
+}));
+
+// --- console_messages ---
+tools.set('console_messages', tool({
+    description: `Get browser console log messages captured during page execution. Use to check for JavaScript errors, verify log output, or debug page issues. More reliable than visual checking for error toasts or log messages.`,
+    inputSchema: z.object({
+        level: z.enum(['error', 'warning', 'info', 'debug']).default('info')
+            .describe('Minimum log level. "error"=only errors, "warning"=errors+warnings, "info"=add info logs, "debug"=all. Default "info".'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        const messages = this._consoleMessages || [];
+        const levelPriority: Record<string, number> = { debug: 0, info: 1, warning: 2, error: 3 };
+        const minPriority = levelPriority[input.level] ?? 1;
+        const filtered = messages.filter((m: any) => (levelPriority[m.level] ?? 0) >= minPriority);
+
+        if (filtered.length === 0) {
+            return `No console messages at level "${input.level}" or above. Total captured: ${messages.length}.`;
+        }
+
+        const formatted = filtered.map((m: any, i: number) =>
+            `[${i + 1}] ${m.level.toUpperCase()}: ${m.text.slice(0, 200)}`
+        ).join('\n');
+
+        return `Console messages (${filtered.length}/${messages.length} at level ≥ "${input.level}"):\n${formatted}`;
+    },
+}));
+
+// --- file_upload ---
+tools.set('file_upload', tool({
+    description: `Upload one or more files via a file input element. When you click a file input button, a file chooser dialog appears. This tool uploads files to the pending file chooser.
+
+Flow: 1) Click the file input button (e.g. "上传文件", "选择文件"), 2) Call file_upload with the file paths.
+
+Paths must be absolute. The file chooser is single-use — after uploading, a new click is needed for another upload.`,
+    inputSchema: z.object({
+        paths: z.array(z.string()).describe('Absolute file paths to upload'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        const fileChooser = this._pendingFileChooser;
+        if (!fileChooser) {
+            return `❌ No pending file chooser. Click a file input element first to trigger a file chooser dialog.`;
+        }
+
+        try {
+            await fileChooser.setFiles(input.paths);
+            this._pendingFileChooser = null;
+            return `✅ Uploaded ${input.paths.length} file(s): ${input.paths.map(p => p.split('/').pop()).join(', ')}`;
+        } catch (err: any) {
+            this._pendingFileChooser = null;
+            return `❌ File upload failed: ${err.message}`;
+        }
+    },
+}));
+
+// --- network_requests ---
+tools.set('network_requests', tool({
+    description: `List network requests made by the page. Use to verify API calls were made, check response status codes, or debug network issues. Returns a numbered list with method, URL, and status code.
+
+Filter by URL pattern (regex) and optionally include static resources (images, fonts, scripts). By default, only API/XHR requests are shown.`,
+    inputSchema: z.object({
+        filter: z.string().optional()
+            .describe('Regex pattern to filter URLs (e.g. "/api/.*user")'),
+        includeStatic: z.boolean().default(false)
+            .describe('Include static resources (images, fonts, scripts). Default false.'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        const requests = this._networkRequests || [];
+        const filter = input.filter ? new RegExp(input.filter) : undefined;
+
+        const lines: string[] = [];
+        for (let i = 0; i < requests.length; i++) {
+            const req = requests[i];
+            if (!input.includeStatic && req.isStatic) continue;
+            if (filter && !filter.test(req.url)) continue;
+
+            const status = req.status ? ` [${req.status}]` : '';
+            const method = req.method || '?';
+            lines.push(`[${i + 1}] ${method} ${req.url.slice(0, 120)}${status}`);
+        }
+
+        if (lines.length === 0) {
+            return `No matching network requests. Total captured: ${requests.length}.`;
+        }
+
+        return `Network requests (${lines.length} shown, ${requests.length} total):\n${lines.join('\n')}`;
+    },
+}));
+
+// --- resize_viewport ---
+tools.set('resize_viewport', tool({
+    description: `Resize the browser viewport (window size). Use for responsive design testing or to trigger layout changes at specific viewport sizes. Common breakpoints: 375×667 (mobile), 768×1024 (tablet), 1280×720 (desktop), 1920×1080 (full HD).`,
+    inputSchema: z.object({
+        width: z.number().min(320).max(3840).describe('Viewport width in pixels'),
+        height: z.number().min(240).max(2160).describe('Viewport height in pixels'),
+    }),
+    execute: async function (this: KevePageAgent, input) {
+        await this.page.setViewportSize({ width: input.width, height: input.height });
+        await this.page.waitForTimeout(300);
+        return `✅ Viewport resized to ${input.width}×${input.height}`;
     },
 }));
 

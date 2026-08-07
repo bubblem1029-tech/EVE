@@ -293,7 +293,7 @@ You MUST output a JSON object with the following FLAT structure every step:
   "evaluation_previous_goal": "Concise one-sentence analysis of your last action. State success, failure, or uncertain. Reference the screenshot if it confirms or contradicts the expected state.",
   "memory": "1-3 concise sentences of key observations that will help in future steps.",
   "next_goal": "State the next immediate goal and action to achieve it.",
-  "tool": "The action tool name (click, type, hover, navigate, scroll, wait, done, visual_locate, visual_assert, etc.)",
+  "tool": "The action tool name (click, type, hover, navigate, scroll, wait, wait_for, done, drag, verify_value, handle_dialog, console_messages, file_upload, network_requests, resize_viewport, visual_locate, visual_assert, select_option, fill_form, pressKey, execute_javascript, etc.)",
   "ref": "Element ref from the accessibility tree, e.g. 'f5e13' (for click/type/hover)",
   "text": "Text to type (for type) OR description for done/visual_locate/visual_assert",
   ...other tool-specific fields...

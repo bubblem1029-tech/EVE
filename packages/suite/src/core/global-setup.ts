@@ -10,7 +10,7 @@ declare global {
   var __keve_cdp_browser: import('@playwright/test').Browser | undefined;
 }
 
-export async function getCdpBrowser(): Promise<import('@playwright/test').Browser> {
+export async function getCdpBrowser(): Promise<import('@playwright/test').Browser | null> {
   // 如果已有共享的 browser 对象，直接复用
   if (globalThis.__keve_cdp_browser && globalThis.__keve_cdp_browser.isConnected()) {
     return globalThis.__keve_cdp_browser;
@@ -23,20 +23,29 @@ export async function getCdpBrowser(): Promise<import('@playwright/test').Browse
   if (!wsUrl && process.env.KEVE_CDP_ENDPOINT) {
     const httpUrl = process.env.KEVE_CDP_ENDPOINT.replace(/\/$/, '');
     try {
-      const resp = await fetch(`${httpUrl}/json/version`);
+      const resp = await fetch(`${httpUrl}/json/version`, { signal: AbortSignal.timeout(5000) });
       const data = await resp.json() as any;
       wsUrl = data.webSocketDebuggerUrl;
       console.log(`[keve CDP] Resolved WS endpoint: ${wsUrl}`);
     } catch (e: any) {
-      throw new Error(`Failed to resolve CDP WebSocket URL from ${httpUrl}: ${e.message}`);
+      console.warn(`[keve CDP] Failed to resolve CDP WebSocket URL from ${httpUrl}: ${e.message} — falling back to non-CDP mode`);
+      return null;
     }
   }
-  if (!wsUrl) throw new Error('No CDP endpoint configured');
+  if (!wsUrl) {
+    console.warn(`[keve CDP] No CDP endpoint configured — falling back to non-CDP mode`);
+    return null;
+  }
 
-  const browser = await chromium.connectOverCDP(wsUrl, { timeout: 15000 });
-  console.log(`[keve CDP] Connected via ${wsUrl}`);
-  globalThis.__keve_cdp_browser = browser;
-  return browser;
+  try {
+    const browser = await chromium.connectOverCDP(wsUrl, { timeout: 15000 });
+    console.log(`[keve CDP] Connected via ${wsUrl}`);
+    globalThis.__keve_cdp_browser = browser;
+    return browser;
+  } catch (connectErr: any) {
+    console.warn(`[keve CDP] connectOverCDP failed: ${connectErr.message} — falling back to non-CDP mode`);
+    return null;
+  }
 }
 
 export function isCdpMode(): boolean {
@@ -51,16 +60,17 @@ export default async function () {
   if (cdpEndpoint) {
     console.log(`[keve global-setup] CDP endpoint detected: ${cdpEndpoint}`);
     // CDP 模式：在 global-setup 中提前连接一次，缓存 Browser 对象
-    try {
-      const browser = await getCdpBrowser();
+    // getCdpBrowser() 失败时返回 null 并清除 CDP 环境变量 → 后续 fixture 自动 fallback
+    const browser = await getCdpBrowser();
+    if (browser) {
       const contexts = browser.contexts();
       const pages = contexts.length > 0 ? contexts[0].pages() : [];
       console.log(`[keve global-setup] CDP connected. contexts=${contexts.length}, pages=${pages.length}`);
       if (pages.length > 0) {
         console.log(`[keve global-setup] Existing tabs: ${pages.map(p => p.url()).join(', ')}`);
       }
-    } catch (e: any) {
-      console.warn(`[keve global-setup] CDP connection failed: ${e.message}`);
+    } else {
+      console.warn(`[keve global-setup] CDP connection failed — tests will use non-CDP fallback (chromium.launch)`);
     }
 
     if (!fs.existsSync(storageStatePath)) {

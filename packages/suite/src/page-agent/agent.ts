@@ -199,6 +199,14 @@ export class KevePageAgent {
 
     private hooks?: AgentHooks;
 
+    // Page event listener state (used by handle_dialog, console_messages, file_upload, network_requests)
+    _dialogHandler: { accept: boolean; promptText?: string } | null = null;
+    _lastDialogInfo: { type: string; message: string; accepted: boolean } | null = null;
+    _pendingFileChooser: any = null;
+    _consoleMessages: any[] = [];
+    _networkRequests: any[] = [];
+    _pageListenersSetup = false;
+
     constructor(page: Page, options?: { maxSteps?: number; customSystemPrompt?: string; hooks?: AgentHooks }) {
         this.page = page;
         this.maxSteps = options?.maxSteps ?? 8;
@@ -220,12 +228,95 @@ export class KevePageAgent {
         this.abortController.abort();
     }
 
+    /** Set up page event listeners for dialog, console, network, and file chooser capture.
+     *  Called once per page; subsequent calls are no-ops. */
+    private setupPageListeners(): void {
+        if (this._pageListenersSetup) return;
+        this._pageListenersSetup = true;
+
+        // ── Dialog handler ──
+        // Playwright auto-dismisses dialogs unless a handler is registered.
+        // Our handler auto-accepts by default, but _dialogHandler can override.
+        this.page.on('dialog', async (dialog: any) => {
+            const handler = this._dialogHandler;
+            const accept = handler?.accept ?? true;
+            const promptText = handler?.promptText;
+
+            try {
+                if (accept) {
+                    await dialog.accept(promptText || '');
+                } else {
+                    await dialog.dismiss();
+                }
+            } catch {
+                // Fallback: always accept to unblock the page
+                try { await dialog.accept(); } catch { /* give up */ }
+            }
+
+            this._lastDialogInfo = {
+                type: dialog.type(),
+                message: dialog.message(),
+                accepted: accept,
+            };
+            this._dialogHandler = null;
+
+            // Notify the Agent so it knows a dialog appeared
+            this.pushObservation(`🔔 Native dialog [${dialog.type()}] appeared: "${dialog.message().slice(0, 100)}" — was ${accept ? 'accepted' : 'dismissed'}.`);
+        });
+
+        // ── Console messages ──
+        this.page.on('console', (msg: any) => {
+            this._consoleMessages.push({ level: msg.type(), text: msg.text() });
+            if (this._consoleMessages.length > 200) this._consoleMessages.shift();
+        });
+        this.page.on('pageerror', (err: any) => {
+            this._consoleMessages.push({ level: 'error', text: `Uncaught: ${err.message}` });
+        });
+
+        // ── Network requests ──
+        this.page.on('request', (req: any) => {
+            const url = req.url();
+            const isStatic = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)(\?|$)/i.test(url);
+            this._networkRequests.push({
+                _req: req,
+                method: req.method(),
+                url,
+                isStatic,
+                status: null,
+            });
+            if (this._networkRequests.length > 100) this._networkRequests.shift();
+        });
+        this.page.on('response', (res: any) => {
+            const req = res.request();
+            // Match by reference identity — Playwright guarantees same Request object
+            for (let i = this._networkRequests.length - 1; i >= 0; i--) {
+                if (this._networkRequests[i]._req === req) {
+                    this._networkRequests[i].status = res.status();
+                    break;
+                }
+            }
+        });
+
+        // ── File chooser ──
+        this.page.on('filechooser', (fileChooser: any) => {
+            this._pendingFileChooser = fileChooser;
+        });
+    }
+
     /** Main Re-Act execute loop */
     async execute(step: string, expected: string, options?: AgentOptions): Promise<AgentResult> {
         // Reset state
         this.events = [];
         this.abortController = new AbortController();
         this.options = options;
+        // Reset page event listener state
+        this._dialogHandler = null;
+        this._lastDialogInfo = null;
+        this._pendingFileChooser = null;
+        this._consoleMessages = [];
+        this._networkRequests = [];
+        // Set up page event listeners (idempotent — only runs once per page)
+        this.setupPageListeners();
         const hooks = options?.hooks ?? this.hooks;
 
         // Link external signal (e.g. per-goal timeout) to internal abort controller

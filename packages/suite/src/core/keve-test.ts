@@ -82,15 +82,25 @@ keveAspect.register({
 export const test = base.extend<KeveFixture>({
   // ── 将内置 testInfo 包装为可解构 fixture ─────────────────────────
   // 测试方法可直接写 { page, keveGoal, testInfo }，不再报 "unknown parameter" 错误
-  testInfo: async ({}, use, testInfo) => {
+  testInfo: async ({ }, use, testInfo) => {
     await use(testInfo);
   },
 
   browser: async ({ }, use, testInfo) => {
     if (isCdpMode()) {
       const browser = await getCdpBrowser(); // 复用全局共享的 CDP browser
-      await use(browser);
-      // CDP 模式下不关闭浏览器（共享连接，关闭会影响后续用例）
+      if (browser) {
+        await use(browser);
+        // CDP 模式下不关闭浏览器（共享连接，关闭会影响后续用例）
+      } else {
+        // CDP 不可达 → graceful fallback 到独立启动浏览器
+        console.log(`[keve-test] CDP unavailable, falling back to chromium.launch()`);
+        const fallback = await chromium.launch(
+          testInfo.project?.use?.launchOptions as any || {},
+        );
+        await use(fallback);
+        await fallback.close();
+      }
     } else {
       const browser = await chromium.launch(
         testInfo.project?.use?.launchOptions as any || {},
@@ -101,7 +111,8 @@ export const test = base.extend<KeveFixture>({
   },
 
   page: async ({ browser }, use) => {
-    if (isCdpMode()) {
+    const isCdp = isCdpMode() && browser.isConnected();
+    if (isCdp) {
       const contexts = browser.contexts();
       const cdpContext = contexts.length > 0 ? contexts[0] : await browser.newContext();
       // CDP 模式：优先复用已有 page（保留登录状态），仅在无可用 page 时新开
@@ -214,48 +225,68 @@ export const test = base.extend<KeveFixture>({
           conclusion: 'blocked',
         };
       } else {
-      // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
-      // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
-      const GOAL_TIMEOUT_MS = 300_000;
-      const goalTimeoutController = new AbortController();
-      const goalTimeout = setTimeout(() => {
-        goalTimeoutController.abort();
-        console.log(`[keveGoal] ⏰ "${options.step}" timed out after ${GOAL_TIMEOUT_MS}ms — stopping agent`);
-      }, GOAL_TIMEOUT_MS);
+        // ── Page liveness check: if fn killed the page, skip Agent Re-Act ──
+        // When fn error involves page/browser close, the page is dead —
+        // Agent cannot take a11y snapshots or interact. Skip immediately.
+        let pageAlive = true;
+        try { await page.url(); } catch { pageAlive = false; }
+        if (!pageAlive) {
+          console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — page is dead after fn error, skipping agent Re-Act`);
+          reactResult = {
+            expectedMet: false,
+            actions: [{
+              action: { tool: 'done', verdict: 'blocked', text: `Page closed after fn error: ${fnError}` },
+              toolOutput: '',
+              result: 'ok',
+            }],
+            finalSnapshot: '',
+            agentScreenshots: [],
+            conclusion: 'blocked',
+          };
+        } else {
+        // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
+        // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
+        const GOAL_TIMEOUT_MS = 300_000;
+        const goalTimeoutController = new AbortController();
+        const goalTimeout = setTimeout(() => {
+          goalTimeoutController.abort();
+          console.log(`[keveGoal] ⏰ "${options.step}" timed out after ${GOAL_TIMEOUT_MS}ms — stopping agent`);
+        }, GOAL_TIMEOUT_MS);
 
-      try {
-        reactResult = await reactLoop(
-          page,
-          options.step,
-          options.expected,
-          {
-            learnedActionsHint: learnedHint,
-            specFilePath: ctx.specFilePath,
-            fnSource,
-            fnResult: fnError ? { error: fnError } : { success: true },
-            signal: goalTimeoutController.signal,
-            goalScreenshotBefore: goalScreenshotBefore || undefined,
-            fnAfterScreenshot: fnAfterScreenshot || undefined,
-          },
-        );
-      } catch (reactErr: any) {
-        reactTimedOut = true;
-        const isGoalTimeout = goalTimeoutController.signal.aborted;
-        const msg = isGoalTimeout
-          ? `Goal timed out (${GOAL_TIMEOUT_MS}ms)`
-          : (reactErr?.message || String(reactErr));
-        console.log(`[keveGoal] reactLoop interrupted: ${msg.slice(0, 200)}`);
-        reactResult = {
-          expectedMet: false,
-          actions: [],
-          finalSnapshot: '',
-          agentScreenshots: [],
-          conclusion: isGoalTimeout ? 'blocked' : 'fail',
-        };
-      } finally {
-        clearTimeout(goalTimeout);
-      }
-      } // end of else (non-blocked path)
+        try {
+          reactResult = await reactLoop(
+            page,
+            options.step,
+            options.expected,
+            {
+              learnedActionsHint: learnedHint,
+              specFilePath: ctx.specFilePath,
+              fnSource,
+              fnResult: fnError ? { error: fnError } : { success: true },
+              signal: goalTimeoutController.signal,
+              goalScreenshotBefore: goalScreenshotBefore || undefined,
+              fnAfterScreenshot: fnAfterScreenshot || undefined,
+            },
+          );
+        } catch (reactErr: any) {
+          reactTimedOut = true;
+          const isGoalTimeout = goalTimeoutController.signal.aborted;
+          const msg = isGoalTimeout
+            ? `Goal timed out (${GOAL_TIMEOUT_MS}ms)`
+            : (reactErr?.message || String(reactErr));
+          console.log(`[keveGoal] reactLoop interrupted: ${msg.slice(0, 200)}`);
+          reactResult = {
+            expectedMet: false,
+            actions: [],
+            finalSnapshot: '',
+            agentScreenshots: [],
+            conclusion: isGoalTimeout ? 'blocked' : 'fail',
+          };
+        } finally {
+          clearTimeout(goalTimeout);
+        }
+        } // end of page-alive else (agent Re-Act path)
+        } // end of else (non-blocked path)
 
       // ── Deterministic override: fn assertion failure cannot be overridden by Agent "pass" ──
       // When fn has a hard assertion failure (Expected X, Received Y), the value mismatch
@@ -465,6 +496,17 @@ function isEnvironmentBlockedError(err: any): boolean {
   // SSO / auth redirect (not the app's fault)
   if (msg.includes('sso redirect') || msg.includes('login redirect detected')
     || msg.includes('err_too_many_redirects')) {
+    return true;
+  }
+
+  // Page/context/browser closed — dead page, Agent cannot explore
+  // e.g. "page.waitForLoadState: Target page, context or browser has been closed"
+  // e.g. "page.ariaSnapshot: Target page, context or browser has been closed"
+  // When the CDP connection drops or the user closes the tab, any page API throws this.
+  // Agent Re-Act on a dead page is a waste of time → BLOCKED immediately.
+  if (msg.includes('target page, context or browser has been closed')
+    || msg.includes('page has been closed') || msg.includes('browser has been closed')
+    || msg.includes('context has been closed')) {
     return true;
   }
 

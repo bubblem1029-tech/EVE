@@ -240,7 +240,10 @@ export async function run(options: RunOptions): Promise<RunResult> {
   await ensurePlaywrightBrowsers();
 
   if (!env.KEVE_CDP_ENDPOINT && !env.KEVE_CDP_WS_ENDPOINT) {
-    env.KEVE_CDP_ENDPOINT = 'http://127.0.0.1:9222';
+    // 不再盲目设置 KEVE_CDP_ENDPOINT fallback — 如果 browserSetup() 未成功启动 Chrome，
+    // 这个 fallback 会让 isCdpMode() 返回 true → getCdpBrowser() 去连一个不存在的 CDP → throw
+    // 现在由 getCdpBrowser() 内部处理 graceful fallback 到非 CDP 模式
+    console.log(chalk.gray('  Note: No CDP endpoint configured — Playwright will launch its own browser'));
   }
 
   const exitCode = await new Promise<number>((resolve) => {

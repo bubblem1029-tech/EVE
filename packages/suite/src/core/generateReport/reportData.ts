@@ -177,9 +177,12 @@ export interface CaseReportItem {
 //   2. ktest 原始的 TCDPQA100195 / TCDPQA100189 等：「大写字母+数字」连续无分隔
 //      （ktest 命名规则：TC=TestCase DPQA=数据平台QA 100195=序列号）
 function parseCaseIdFromTitle(title: string): string | null {
-  const colonMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+):/);
-  const bracketMatch = title.match(/\[([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+)\]/);
-  const spaceMatch = title.match(/^([A-Z]+(?:-[A-Z]+)*-\d+|[A-Z]+\d+)\s/);
+  // Case ID patterns: "SKILL_SHARE-01:", "AG-01:", "ABC123:", "[REG-02]"
+  // Supports: underscores (SKILL_SHARE), hyphens (REG-01), pure alphanumeric (ABC123)
+  const caseIdPattern = '[A-Z][A-Z0-9]*(?:[_-][A-Z0-9]+)*-\\d+|[A-Z]+\\d+';
+  const colonMatch = title.match(new RegExp(`^(${caseIdPattern}):`));
+  const bracketMatch = title.match(new RegExp(`\\[(${caseIdPattern})\\]`));
+  const spaceMatch = title.match(new RegExp(`^(${caseIdPattern})\\s`));
   return colonMatch?.[1] || bracketMatch?.[1] || spaceMatch?.[1] || null;
 }
 
