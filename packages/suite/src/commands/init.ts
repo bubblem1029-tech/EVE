@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import chalk from 'chalk';
-import { generatePwConfig, type PwConfigOptions } from '../core/pw-config';
+import { generatePwConfig, type PwConfigOptions } from '../engine-playwright/pw-config.js';
 
 // Skills bundled in this package — copied to global ~/.codeflicker/skills/
 const KEVE_SKILLS = [

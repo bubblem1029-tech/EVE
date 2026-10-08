@@ -10,7 +10,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { sceneGoalsMap } from '../keve-registry';
+import { sceneGoalsMap } from '../decorator/keve-registry.js';
+import { mergeRuntimeDiagnostics, type RuntimeDiagnostics } from '../../page-agent/diagnostics.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 export interface ReportDataOptions {
@@ -25,11 +26,13 @@ function resolveOptions(opts: ReportDataOptions) {
   const TEST_RESULTS_JSON = opts.resultsPath;
   const CONFIDENCE_DATA_JSONL = opts.confidencePath || path.join(path.dirname(TEST_RESULTS_JSON), 'confidence-data.jsonl');
   const TEST_CASES_YAML = opts.casesPath || path.join(PROJECT_ROOT, 'test-cases.yaml');
-  // REPORTS_DIR = parent of round-N dirs (e.g. .keve/{plan}/test-artifacts/)
-  // test-results.json is inside round-N dir, so go up one level
-  const RESULT_PARENT_DIR = path.dirname(path.dirname(TEST_RESULTS_JSON));
-  const SCREENSHOTS_DIR = path.join(RESULT_PARENT_DIR, 'screenshots');
-  const REPORTS_DIR = RESULT_PARENT_DIR;
+  // test-results.json 所在目录即当前轮次目录：
+  //   新布局 <taskRoot>/reports/round-N
+  //   旧布局 <taskDir>/test-artifacts/round-N
+  // 因此轮次父目录是 REPORTS_DIR，截图则在轮次目录内部。
+  const ROUND_DIR = path.dirname(TEST_RESULTS_JSON);
+  const SCREENSHOTS_DIR = path.join(ROUND_DIR, 'screenshots');
+  const REPORTS_DIR = path.dirname(ROUND_DIR);
   return { PROJECT_ROOT, TEST_RESULTS_JSON, CONFIDENCE_DATA_JSONL, TEST_CASES_YAML, SCREENSHOTS_DIR, REPORTS_DIR };
 }
 
@@ -169,6 +172,8 @@ export interface CaseReportItem {
   errorCategory?: string;
   /** AI 观察到的诊断提示（如 disabled 按钮、SSO 重定向等） */
   diagnosticHint?: string;
+  /** 运行诊断（性能 / 网络 / 浏览器错误 / 质量信号），用例级聚合 */
+  diagnostics?: RuntimeDiagnostics;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -185,6 +190,19 @@ function parseCaseIdFromTitle(title: string): string | null {
   const spaceMatch = title.match(new RegExp(`^(${caseIdPattern})\\s`));
   return colonMatch?.[1] || bracketMatch?.[1] || spaceMatch?.[1] || null;
 }
+
+/**
+ * @keveModel 的模块 ID（describe 标题 `"${id}: ${description}"` 中冒号前的部分）。
+ *
+ * 三种合法形态（与 parseCaseIdFromTitle 的取值域保持一致）：
+ *   1. DSL 转译：`M_SG90061`（含下划线）
+ *   2. 手写/LLM：`AG` / `AG-01` / `SKILL_SHARE-01`（含下划线与短横线）
+ *   3. ktest 原始编号：`7473423`（纯数字）
+ *
+ * 之前这里只认「纯字母 + 短横线」或「纯数字」，导致 DSL 生成的 `M_SG90061` 与
+ * `AG-01` 全部匹配失败、模块名退化成 `default` —— 所有用例在报告里被并成一个分组。
+ */
+const MODULE_ID_PATTERN = '[A-Z][A-Z0-9]*(?:[_-][A-Z0-9]+)*|\\d+';
 
 /**
  * Strip surrounding quotes from YAML string values.
@@ -503,7 +521,7 @@ function buildCaseResultMap(specs: PlaywrightSpec[], taskDir: string): Record<st
     const pwModuleTitle = suitePathParts.length >= 2 ? suitePathParts[suitePathParts.length - 1].trim() : suitePathParts[0].trim();
     // @keveModel title format: "${id}: ${description}" — extract module ID and description
     // 模块 ID 可能是字母格式（如 AG-01）或 ktest 纯数字格式（如 7473423）
-    const moduleIdMatch = pwModuleTitle.match(/^([A-Z]+(?:-[A-Z]+)*|\d+):\s*(.+)$/);
+    const moduleIdMatch = pwModuleTitle.match(new RegExp(`^(${MODULE_ID_PATTERN}):\\s*(.+)$`));
     const pwModuleId = moduleIdMatch?.[1] || '';
     const pwModuleDescription = moduleIdMatch?.[2] || pwModuleTitle;
 
@@ -549,7 +567,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
   const confidenceDist = { '95-100': 0, '61-90': 0, '41-60': 0, '0-40': 0 };
 
   // Read confidence-data.jsonl (AI evaluation results from KeveReporter)
-  let aiConfidenceMap: Record<string, { data: string; confidence: number; thought: string; error: string | null; errorCategory?: string; diagnosticHint?: string; steps?: any[] }> = {};
+  let aiConfidenceMap: Record<string, { data: string; confidence: number; thought: string; error: string | null; errorCategory?: string; diagnosticHint?: string; steps?: any[]; diagnostics?: RuntimeDiagnostics }> = {};
   if (fs.existsSync(CONFIDENCE_DATA_JSONL)) {
     try {
       const lines = fs.readFileSync(CONFIDENCE_DATA_JSONL, 'utf-8').trim().split('\n');
@@ -596,6 +614,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
             errorCategory: entry.errorCategory || undefined,
             diagnosticHint: entry.diagnosticHint || undefined,
             steps,
+            diagnostics: entry.diagnostics,
           };
         }
       }
@@ -611,6 +630,19 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
   // Primary data source: Playwright test-results.json (from @keveModel/@keveScene decorators)
   // Optional enhancement: test-cases.yaml (priority, precondition, type, notes)
   // This ensures decorator-defined structure drives the report, avoiding ID/title mismatch.
+
+  /** 从已执行步骤提取 Agent 最终结论（done.text），用于补全空 thought。 */
+  function extractFinalConclusion(steps: StepReportItem[]): string {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const actions = steps[i]?.actions;
+      if (!actions?.length) continue;
+      for (let j = actions.length - 1; j >= 0; j--) {
+        const action = actions[j];
+        if (action?.tool === 'done' && action?.text) return action.text.trim();
+      }
+    }
+    return '';
+  }
 
   // Build a YAML lookup by caseId for optional enrichment
   const yamlCaseLookup: Record<string, TestCaseDef> = {};
@@ -629,11 +661,10 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
 
     // AI evaluation: match by Playwright title (scene.title, the canonical key)
     const aiEntry = aiConfidenceMap[result.title] || aiConfidenceMap[caseId];
-    const data = effectiveStatus === 'skipped' ? '待确认' : (aiEntry?.data || '待确认');
+    const data = effectiveStatus === 'skipped' ? '待确认' : (aiEntry?.data || (effectiveStatus === 'passed' ? '通过' : '待确认'));
     // When aiEntry is missing, confidence should be 0 (no AI evaluation performed),
     // not a hardcoded fallback like 70/35 which implies AI evaluated but was uncertain.
     const confidence = effectiveStatus === 'skipped' ? 0 : (aiEntry?.confidence ?? 0);
-    const confidenceReason = effectiveStatus === 'skipped' ? '用例被跳过' : (aiEntry?.thought || '无AI评估数据');
     // Distribute by data value + confidence
     if (effectiveStatus === 'skipped') { /* skip */ }
     else if (data === '通过') confidenceDist['95-100']++;
@@ -709,6 +740,8 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
           expected: g.expected,
           precondition: g.precondition,
           order: g.order,
+          status: effectiveStatus === 'passed' ? 'passed' : (g.success === false ? 'failed' : 'unexecuted'),
+          success: g.success,
         }))
         : []);
 
@@ -727,19 +760,23 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
         // Skip if already present in executed steps (matched by step text or order)
         if (executedStepSet.has(ys.step)) continue;
         if (steps.some(s => s.order === i)) continue;
-        // Add unexecuted YAML step
+        // Add unexecuted YAML step — if case passed, mark as passed; otherwise unexecuted
         steps.push({
           step: ys.step,
           expected: ys.expected,
           order: i,
-          success: undefined,
-          // Mark as unexecuted so frontend can render "未执行" state
-          status: 'unexecuted',
+          success: effectiveStatus === 'passed' ? true : undefined,
+          status: effectiveStatus === 'passed' ? 'passed' : 'unexecuted',
         });
       }
       // Sort by order to ensure correct sequencing
       steps.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     }
+
+    const extractedConclusion = extractFinalConclusion(steps);
+    const confidenceReason = effectiveStatus === 'skipped'
+      ? '用例被跳过'
+      : (aiEntry?.thought || extractedConclusion || '无AI评估数据');
 
     caseResults.push({
       caseId,
@@ -760,7 +797,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
       stdout: result.stdout,
       data,
       confidence,
-      thought: aiEntry?.thought || (effectiveStatus === 'skipped' ? '用例被跳过（非自动执行）' : ''),
+      thought: aiEntry?.thought || extractedConclusion || (effectiveStatus === 'skipped' ? '用例被跳过（非自动执行）' : ''),
       confidenceReason,
       stepScreenshots: stepScreenshotsPaths,
       screenshotPath: result.screenshotPath,
@@ -769,6 +806,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
       keveScreenshots: keveScreenshotsPaths,
       errorCategory: aiEntry?.errorCategory,
       diagnosticHint: aiEntry?.diagnosticHint,
+      diagnostics: aiEntry?.diagnostics,
     });
   }
 

@@ -1,13 +1,30 @@
+import type { Message } from './types'
+
 /**
- * LLM call lifecycle events — emitted by LLM class for observability bridges.
+ * CustomEvent polyfill for Node 18.
  *
- * keve-core stays dependency-free; consumers (e.g. eve-llm langfuse-bridge)
- * listen to these events and forward to their own observability backend.
+ * Node 18 ships EventTarget (used by `LLM extends EventTarget`) but NOT the
+ * global CustomEvent class — that only landed in Node 19+. Running on Node 18
+ * (e.g. eve-backend's pinned runtime) throws `ReferenceError: CustomEvent is
+ * not defined` the moment emitStart/emitEnd fire, which kills every
+ * LLM.invoke() call before it ever reaches the network.
+ *
+ * Installed on globalThis at module load so every unqualified
+ * `new CustomEvent(...)` call site picks it up. Browsers and Node 19+ already
+ * provide a spec-compliant CustomEvent, so this is a no-op there.
  */
+if (typeof (globalThis as any).CustomEvent === 'undefined') {
+	class CustomEventPolyfill<T = any> extends Event {
+		detail: T | null
+		constructor(type: string, params?: CustomEventInit<T>) {
+			super(type, params)
+			this.detail = params?.detail ?? null
+		}
+	}
+	; (globalThis as any).CustomEvent = CustomEventPolyfill
+}
 
 export type LLMCallMethod = 'chat' | 'chatWithTools' | 'invoke'
-
-import type { Message } from './types'
 
 export interface LLMCallStartDetail {
 	/** Unique ID to pair start/end events */

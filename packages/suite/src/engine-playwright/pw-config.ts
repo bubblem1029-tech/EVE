@@ -6,7 +6,8 @@
  */
 
 import * as path from 'node:path';
-import { findKeveDir, resolveTaskDir, getBranchDir } from '../config';
+import * as fs from 'node:fs';
+import { findKeveDir, resolveTaskDir, getBranchDir } from '../config.js';
 
 export interface PwConfigOptions {
   baseUrl?: string;
@@ -78,7 +79,7 @@ export default defineConfig({
     baseURL: ${baseURLLine},${cdp ? `\n    // CDP mode: login state preserved via connected Chrome` : `\n    storageState: path.resolve(projectRoot, '.auth/storage-state.json'),`}
     trace: 'on-first-retry',
     screenshot: 'off',
-    video: 'retain-on-failure',
+    video: 'on',
     actionTimeout: 5000,${cdpBlock}
   },
   outputDir: path.join(resultDir, 'test-results'),${webServerBlock}
@@ -137,7 +138,7 @@ export default defineConfig({
     baseURL: ${baseURLLine},${cdp ? `\n    // CDP mode: login state preserved via connected Chrome` : `\n    storageState: resolve(projectRoot, '.auth', 'storage-state.json'),`}
     trace: 'on-first-retry',
     screenshot: 'off',
-    video: 'retain-on-failure',
+    video: 'on',
     actionTimeout: 5000,${cdpBlock}
   },
   outputDir: join(resultDir, 'test-results'),${webServerBlock}
@@ -176,7 +177,7 @@ export function findExistingConfig(keveDir: string | null, taskDir: string | nul
   searchPaths.push(path.join(process.cwd(), 'keve_test_spec', 'keve-test.config.ts'));
 
   for (const p of searchPaths) {
-    if (require('fs').existsSync(p)) return p;
+    if (fs.existsSync(p)) return p;
   }
   return null;
 }

@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chalk from 'chalk';
-import { findKeveDir } from '../config';
+import { findKeveDir } from '../config.js';
 
 export interface CleanOptions {
   rounds?: boolean;

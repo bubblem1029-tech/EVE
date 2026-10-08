@@ -1,5 +1,6 @@
 node_modules/
 dist/
+docs/
 .output/
 .DS_Store
 *.log
@@ -11,4 +12,18 @@ github
 pnpm-lock.yaml
 # Rust / Tauri build artifacts
 **/target/
+
+# Cypress / 引擎能力探针临时目录（本地调研用，不入库）
+.tmp-cyprobe/
+.tmp-cyprobe2/
+.tmp-frameprobe/
+
+# suite 测试执行临时目录与报告产物
+**/.tmp-cyneg/
+**/.tmp-cyverify/
+**/.tmp-negcontrol/
+**/.tmp-verify-engines/
+
+# KEVE 测试运行产物（保留 .keve 配置和用例目录）
+**/.keve/test-artifacts/
 

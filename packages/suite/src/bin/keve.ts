@@ -14,11 +14,12 @@
 
 import { Command } from 'commander';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 // package.json is in the package root, not in dist/
 // __dirname → dist/bin/ → go up 2 levels to package root
 const pkgPath = path.resolve(__dirname, '..', '..', 'package.json');
-const pkg = require(pkgPath);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
 
 const program = new Command();
 

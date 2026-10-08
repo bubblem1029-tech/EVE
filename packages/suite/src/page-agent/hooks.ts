@@ -1,7 +1,6 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { z } from 'zod';
-import type { AgentResult, AgentStepEvent } from './agent';
+import type { AgentResult, AgentStepEvent } from './agent.js';
+import type { AgentPage } from './page-like.js';
 
 /* scriptRefine \u5df2\u6ce8\u91ca \u2014 \u4ea7\u51fa\u65e0\u4e0b\u6e38\u6d88\u8d39\u4e14\u4e0d\u53d7 keveGoal \u8d85\u65f6\u63a7\u5236\uff0c\u8be6\u89c1 WW-02 \u6839\u56e0\u5206\u6790
 const REFINE_OUTPUT_SCHEMA = z.object({
@@ -82,8 +81,9 @@ Generate a unified diff patch to fix the fn. Add the missing operations that Re-
 
         // Save patch file
         const taskDir = process.env.KEVE_TASK_DIR || '.keve';
-        const round = process.env.KEVE_ROUND || 'latest';
-        const refineDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'refine');
+        const refineDir = process.env.KEVE_RESULT_DIR
+          ? path.join(path.resolve(process.env.KEVE_RESULT_DIR), 'refine')
+          : path.join(taskDir, 'test-artifacts', `round-${process.env.KEVE_ROUND || 'latest'}`, 'refine');
         fs.mkdirSync(refineDir, { recursive: true });
         const safeName = input.testTitle.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_').slice(0, 40);
         const patchFile = path.join(refineDir, `refine-${safeName}-step${input.order}.patch`);
@@ -121,7 +121,7 @@ Generate a unified diff patch to fix the fn. Add the missing operations that Re-
  * Only meaningful when result.success === false.
  */
 export async function extractDiagnosticHints(
-    page: import('@playwright/test').Page,
+    page: AgentPage,
     result: AgentResult,
 ): Promise<string[]> {
     const hints: string[] = [];
@@ -151,7 +151,7 @@ export async function extractDiagnosticHints(
 
     // 3. Inspect live page DOM
     try {
-        const currentUrl = page.url();
+        const currentUrl = await page.url();
         console.log(`[diagnostic] page.url() = ${currentUrl}`);
         if (currentUrl === 'about:blank' || currentUrl === '') {
             hints.push('Playwright 页面对象停留在 about:blank，AI 探索未导航到目标页面（LLM 不可用或未配置）');

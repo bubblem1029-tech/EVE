@@ -7,7 +7,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { generateReportData, type ReportDataOptions } from './reportData';
+import { generateReportData, type ReportDataOptions } from './reportData.js';
 
 export type { ReportDataOptions };
 

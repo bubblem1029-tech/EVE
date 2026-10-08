@@ -11,9 +11,9 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn, execSync } from 'node:child_process';
 import chalk from 'chalk';
-import { findKeveDir, getNextRoundFromState, completeRound, resolveTaskDir } from '../config';
-import { generateReport } from '../core/generateReport/report';
-import { generateReportData } from '../core/generateReport/reportData';
+import { findKeveDir, getNextRoundFromState, completeRound, resolveTaskDir } from '../config.js';
+import { generateReport } from '../core/generateReport/report.js';
+import { generateReportData } from '../core/generateReport/reportData.js';
 
 function isPlaywrightBrowserInstalled(): boolean {
   const cacheDir = os.platform() === 'darwin'
@@ -140,7 +140,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
   try {
     pwConfig = await new Function('return import(' + JSON.stringify(configPath) + ')')();
   } catch (e: any) {
-    throw new KeveRunError(`Failed to import Playwright config: ${e.message}`);
+    // 包含 config 路径和完整错误堆栈，便于定位 "Invalid left-hand side" 等语法错误
+    throw new KeveRunError(`Failed to import Playwright config (${configPath}): ${e.message}\n${e.stack || ''}`);
   }
   const configDefault = pwConfig?.default || pwConfig;
 

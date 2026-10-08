@@ -16,18 +16,24 @@
  *   const result = await agent.execute(step, expected, { learnedActionsHint, fnResult });
  */
 
-import type { Page } from '@playwright/test';
 import { LLM, type Message, type ContentItem, type Tool } from '@kkeve/core/llm';
 import { z } from 'zod';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { /* scriptRefine, */ extractDiagnosticHints } from './hooks';
-import { packMacroToolSchema, tools, getZodShape, type MacroToolInput, type ToolContext } from './tools';
-import { loadConfig } from '../config';
-
-// ─── System Prompt ────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = fs.readFileSync(path.join(__dirname, "system_prompt.md"), "utf-8");
+import { /* scriptRefine, */ extractDiagnosticHints } from './hooks.js';
+import { packMacroToolSchema, tools, getZodShape, type MacroToolInput, type ToolContext } from './tools.js';
+import type { AgentInitialImageLoader, AgentPage, AgentScreenshotSaver } from './page-like.js';
+import { SYSTEM_PROMPT } from './system-prompt.js';
+import { toAgentPage } from './playwright-page.js';
+import {
+    buildRuntimeDiagnostics,
+    clipDiagnosticText,
+    isStaticUrl,
+    pagePerformanceProbeSource,
+    type PagePerformanceMetrics,
+    type RawAiUsageRecord,
+    type RawConsoleRecord,
+    type RawNetworkRecord,
+    type RuntimeDiagnostics,
+} from './diagnostics.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -43,6 +49,8 @@ export interface AgentStepEvent {
     toolError?: string;
     snapshot: string;
     screenshotPath?: string;
+    /** 工具执行耗时（ms）；LLM 调度异常时缺省 */
+    duration?: number;
 }
 
 export interface AgentObservationEvent {
@@ -62,6 +70,8 @@ export interface AgentResult {
     data: string;
     events: AgentEvent[];
     finalSnapshot: string;
+    /** 运行诊断：性能、网络、浏览器错误与质量信号 */
+    diagnostics?: RuntimeDiagnostics;
     // refinePatch?: string; // 已注释：scriptRefine 已禁用
     agentScreenshots?: string[];
     diagnosticHints?: string[];
@@ -92,6 +102,37 @@ export interface AgentOptions {
     goalScreenshotBefore?: string;
     /** fn-after 截图路径（相对 taskDir）— fn 执行后的页面状态 */
     fnAfterScreenshot?: string;
+}
+
+/**
+ * Agent 的宿主能力注入点。
+ *
+ * `page-agent` 现在同时服务 Playwright 与 Cypress（浏览器 bundle），因此不能再
+ * 直接持有 Node API。所有原本写死的 Node 能力（读 prompt / 落盘截图 / 读本地
+ * 图片 / 读环境变量 / LLM 传输）都改为构造时注入；Playwright 侧给 Node 实现，
+ * Cypress 侧给 HTTP 桥实现。
+ */
+export interface AgentHostOptions {
+    /** system prompt 文本（缺省用编译期内联的 SYSTEM_PROMPT） */
+    systemPrompt?: string;
+    /** 目标应用 URL（原 process.env.KEVE_TARGET_URL） */
+    targetUrl?: string;
+    /** 环境变量读取（原 process.env.X），缺省返回空串 */
+    getEnv?: (name: string) => string;
+    /** 截图落盘，返回相对 taskDir 的路径（原 saveScreenshotBuffer 的 fs 部分） */
+    saveScreenshot?: AgentScreenshotSaver;
+    /** 读取初始多模态截图（原 loadInitialScreenshots 的 fs 部分） */
+    loadInitialImages?: AgentInitialImageLoader;
+    /** LLM 配置；缺省从注入的环境变量拼装 */
+    llm?: {
+        baseURL: string;
+        model: string;
+        apiKey?: string;
+        temperature?: number;
+        maxRetries?: number;
+        /** 浏览器侧经桥转发；Node 侧缺省走原生 fetch */
+        customFetch?: typeof globalThis.fetch;
+    };
 }
 
 // ─── Snapshot diff helpers (used by assembleUserPrompt to add Page Change to history) ───
@@ -186,13 +227,19 @@ function summarizeSnapshotDiff(prev: string, curr: string): string {
 // ─── KevePageAgent ──────────────────────────────────────────────────────
 
 export class KevePageAgent {
-    readonly page: Page;
+    readonly page: AgentPage;
     readonly maxSteps: number;
 
     readonly llm: LLM;
     events: AgentEvent[] = [];
     private abortController = new AbortController();
     private systemPrompt: string;
+
+    /** 目标应用 URL（原 process.env.KEVE_TARGET_URL） */
+    readonly targetUrl: string;
+    private getEnvFn: (name: string) => string;
+    private saveScreenshotFn?: AgentScreenshotSaver;
+    private loadInitialImagesFn?: AgentInitialImageLoader;
 
     /** Current execute options (set at start of execute(), accessible from hooks) */
     options?: AgentOptions;
@@ -205,22 +252,52 @@ export class KevePageAgent {
     _pendingFileChooser: any = null;
     _consoleMessages: any[] = [];
     _networkRequests: any[] = [];
+    _browserDiagnostics: RawConsoleRecord[] = [];
+    _networkDiagnostics: RawNetworkRecord[] = [];
+    /** 本次 execute 内 LLM 推理累计耗时（ms） */
+    _aiReasoningMs = 0;
+    /** 本次 execute 内 LLM token 累计用量 */
+    _aiUsage: RawAiUsageRecord = { llmCalls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    /** 本次 execute 内工具操作累计耗时（ms） */
+    _actionMs = 0;
+    /** 本次 execute 起始时间，用于总耗时诊断 */
+    _executeStartedAt = 0;
     _pageListenersSetup = false;
+    /** 页面级性能指标（execute 结束时一次性读取；读取失败则留空） */
+    private _lastPageMetrics?: PagePerformanceMetrics;
 
-    constructor(page: Page, options?: { maxSteps?: number; customSystemPrompt?: string; hooks?: AgentHooks }) {
+    constructor(
+        page: AgentPage,
+        options?: { maxSteps?: number; customSystemPrompt?: string; hooks?: AgentHooks } & AgentHostOptions,
+    ) {
         this.page = page;
         this.maxSteps = options?.maxSteps ?? 8;
         this.systemPrompt = options?.customSystemPrompt || SYSTEM_PROMPT;
         this.hooks = options?.hooks;
 
-        const cfg = loadConfig();
+        this.getEnvFn = options?.getEnv || (() => '');
+        this.targetUrl = options?.targetUrl || this.getEnvFn('KEVE_TARGET_URL') || '';
+        this.saveScreenshotFn = options?.saveScreenshot;
+        this.loadInitialImagesFn = options?.loadInitialImages;
+
+        const llmConfig = options?.llm || {
+            baseURL: this.getEnvFn('KEVE_LLM_BASE_URL'),
+            model: this.getEnvFn('KEVE_LLM_MODEL_NAME'),
+            apiKey: this.getEnvFn('KEVE_LLM_API_KEY'),
+        };
         this.llm = new LLM({
-            baseURL: cfg.llm.base_url,
-            model: cfg.llm.model,
-            apiKey: cfg.llm.api_key || '',
+            baseURL: llmConfig.baseURL,
+            model: llmConfig.model,
+            apiKey: llmConfig.apiKey || '',
             temperature: 0.1,
             maxRetries: 3,
+            customFetch: llmConfig.customFetch,
         });
+    }
+
+    /** 读取宿主注入的环境变量（Cypress 侧由 cy.env 转发，Playwright 侧即 process.env） */
+    getEnv(name: string): string {
+        return this.getEnvFn(name) || '';
     }
 
     /** Stop the current execution */
@@ -266,23 +343,31 @@ export class KevePageAgent {
 
         // ── Console messages ──
         this.page.on('console', (msg: any) => {
-            this._consoleMessages.push({ level: msg.type(), text: msg.text() });
+            const level = msg.type();
+            const text = msg.text();
+            this._consoleMessages.push({ level, text });
             if (this._consoleMessages.length > 200) this._consoleMessages.shift();
+            this._browserDiagnostics.push({ level, text, at: Date.now(), kind: 'console' });
+            if (this._browserDiagnostics.length > 500) this._browserDiagnostics.shift();
         });
         this.page.on('pageerror', (err: any) => {
-            this._consoleMessages.push({ level: 'error', text: `Uncaught: ${err.message}` });
+            const text = `Uncaught: ${err?.message || String(err)}`;
+            this._consoleMessages.push({ level: 'error', text });
+            this._browserDiagnostics.push({ level: 'error', text, at: Date.now(), kind: 'pageerror' });
+            if (this._browserDiagnostics.length > 500) this._browserDiagnostics.shift();
         });
 
         // ── Network requests ──
         this.page.on('request', (req: any) => {
             const url = req.url();
-            const isStatic = /\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)(\?|$)/i.test(url);
+            const isStatic = isStaticUrl(url);
             this._networkRequests.push({
                 _req: req,
                 method: req.method(),
                 url,
                 isStatic,
                 status: null,
+                startedAt: Date.now(),
             });
             if (this._networkRequests.length > 100) this._networkRequests.shift();
         });
@@ -291,11 +376,51 @@ export class KevePageAgent {
             // Match by reference identity — Playwright guarantees same Request object
             for (let i = this._networkRequests.length - 1; i >= 0; i--) {
                 if (this._networkRequests[i]._req === req) {
-                    this._networkRequests[i].status = res.status();
+                    const item = this._networkRequests[i];
+                    const status = res.status();
+                    const durationMs = item.startedAt ? Date.now() - item.startedAt : undefined;
+                    item.status = status;
+                    item.durationMs = durationMs;
+                    this._networkDiagnostics.push({
+                        url: item.url,
+                        method: item.method,
+                        status,
+                        durationMs,
+                        isStatic: item.isStatic,
+                        at: item.startedAt,
+                    });
+                    if (this._networkDiagnostics.length > 500) this._networkDiagnostics.shift();
                     break;
                 }
             }
         });
+        // 请求失败（DNS/超时/连接重置等）没有 response 事件，必须在 requestfailed 记录。
+        const onRequestFailed = (req: any) => {
+            const failure = req.failure?.();
+            const error = failure?.errorText || 'request failed';
+            let item: any;
+            for (let i = this._networkRequests.length - 1; i >= 0; i--) {
+                if (this._networkRequests[i]._req === req) {
+                    item = this._networkRequests[i];
+                    break;
+                }
+            }
+            const url = item?.url || req.url();
+            const durationMs = item?.startedAt ? Date.now() - item.startedAt : undefined;
+            this._networkDiagnostics.push({
+                url,
+                method: item?.method || req.method(),
+                status: 0,
+                durationMs,
+                error: clipDiagnosticText(error),
+                isStatic: item?.isStatic ?? isStaticUrl(url),
+                at: item?.startedAt,
+            });
+            if (this._networkDiagnostics.length > 500) this._networkDiagnostics.shift();
+        };
+        // Playwright 的 AgentPage 契约只保证 on/emit，requestfailed 是原生事件。
+        // 用可选探测，避免 Cypress 占位实现或其他 AgentPage 实现因未知事件报错。
+        try { this.page.on('requestfailed', onRequestFailed); } catch { /* 非 Playwright 实现可忽略 */ }
 
         // ── File chooser ──
         this.page.on('filechooser', (fileChooser: any) => {
@@ -315,6 +440,13 @@ export class KevePageAgent {
         this._pendingFileChooser = null;
         this._consoleMessages = [];
         this._networkRequests = [];
+        this._browserDiagnostics = [];
+        this._networkDiagnostics = [];
+        this._aiReasoningMs = 0;
+        this._aiUsage = { llmCalls: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        this._actionMs = 0;
+        this._executeStartedAt = Date.now();
+        this._lastPageMetrics = undefined;
         // Set up page event listeners (idempotent — only runs once per page)
         this.setupPageListeners();
         const hooks = options?.hooks ?? this.hooks;
@@ -334,7 +466,7 @@ export class KevePageAgent {
         const systemPrompt = options?.customSystemPrompt || this.systemPrompt;
 
         // Inject context/learned hints as initial observations
-        const targetUrl = process.env.KEVE_TARGET_URL || '';
+        const targetUrl = this.targetUrl;
         if (targetUrl) {
             this.pushObservation(`Target application URL: ${targetUrl}. Use this URL for navigation. Do NOT construct URLs yourself — use the navigate tool with this URL or read process.env.KEVE_TARGET_URL.`);
         }
@@ -369,14 +501,14 @@ export class KevePageAgent {
                     // ── Observe: get browser state (ariaSnapshot only — no per-step screenshot) ──
                     console.log('\x1b[34m\x1b[1m👀 Observing...\x1b[0m');
                     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
-                    const url = this.page.url();
+                    const url = await this.page.url();
                     console.log(`  url: ${url.slice(0, 120)} | step ${stepCount + 1}/${maxSteps}`);
 
                     // ── Assemble messages (text-only per step; initial screenshots on step 0) ──
                     const userText = this.assembleUserPrompt(step, expected, snapshot, url, stepCount, maxSteps);
                     let userContent: string | ContentItem[];
                     if (stepCount === 0) {
-                        const initialImages = this.loadInitialScreenshots(options);
+                        const initialImages = await this.loadInitialScreenshots(options);
                         userContent = initialImages.length > 0
                             ? [{ type: 'text', text: userText }, ...initialImages]
                             : userText;
@@ -392,12 +524,19 @@ export class KevePageAgent {
                     console.log('\x1b[34m\x1b[1m🧠 Thinking...\x1b[0m');
                     const macroTool = this.buildMacroTool();
 
-                    const llmResult = await this.llm.invoke(
-                        messages,
-                        macroTool,
-                        this.abortController.signal,
-                        { toolChoiceName: 'AgentOutput' },
-                    );
+                    const llmStartedAt = Date.now();
+                    let llmResult: Awaited<ReturnType<typeof this.llm.invoke>>;
+                    try {
+                        llmResult = await this.llm.invoke(
+                            messages,
+                            macroTool,
+                            this.abortController.signal,
+                            { toolChoiceName: 'AgentOutput' },
+                        );
+                        this.recordAiUsage(llmResult.usage);
+                    } finally {
+                        this._aiReasoningMs += Date.now() - llmStartedAt;
+                    }
 
                     const macroInput = llmResult.toolCall.args as MacroToolInput;
                     const execResult = llmResult.toolResult as { toolName: string; output: string; error?: string; duration?: number };
@@ -437,7 +576,9 @@ export class KevePageAgent {
                         toolError: execResult.error,
                         snapshot,
                         screenshotPath: undefined,
+                        duration: execResult.duration,
                     };
+                    if (execResult.duration !== undefined) this._actionMs += execResult.duration;
                     this.events.push(stepEvent);
 
                     // If execution had error, add observation
@@ -464,8 +605,8 @@ export class KevePageAgent {
                     if (actionName === 'done') {
                         // Capture done-time screenshot as goal-after evidence
                         try {
-                            const doneBuf = await this.page.screenshot({ type: 'png', timeout: 15000 });
-                            stepEvent.screenshotPath = this.saveScreenshotBuffer(doneBuf, stepCount, step);
+                            const doneShot = await this.page.screenshot({ type: 'png', timeout: 15000 });
+                            stepEvent.screenshotPath = await this.saveScreenshotBuffer(doneShot.base64, stepCount, step);
                         } catch { /* non-critical */ }
 
                         // Extract conclusion: 4-level backoff
@@ -593,6 +734,12 @@ export class KevePageAgent {
                 await new Promise(r => setTimeout(r, 300));
             }
         } finally {
+            // 页面级性能只能在用例收敛后读一次（LCP/longtask 需要缓冲已完成）
+            await this.capturePageMetrics();
+            if (taskResult!) {
+                // 用完整诊断（含页面性能）覆盖此前构建的结果
+                taskResult!.diagnostics = this.buildDiagnostics();
+            }
             // ── onAfterTask hook — may return partial overrides ──
             const hookResult = await hooks?.onAfterTask?.(this, taskResult!);
             if (hookResult && taskResult) {
@@ -607,6 +754,76 @@ export class KevePageAgent {
 
     private pushObservation(content: string): void {
         this.events.push({ type: 'observation', content });
+    }
+
+    /**
+     * 读取页面级性能指标。
+     *
+     * Playwright 与 Cypress 都走同一段探针源码：Playwright 在真实页面上下文，
+     * Cypress 在 AUT 的 isolated world（navigation timing / performance entries
+     * 与主世界共享同一份 Performance 数据）。
+     */
+    private async capturePageMetrics(): Promise<void> {
+        try {
+            const raw = await this.page.evaluate(pagePerformanceProbeSource());
+            if (raw && typeof raw === 'object') {
+                this._lastPageMetrics = raw as PagePerformanceMetrics;
+            }
+        } catch {
+            // 性能指标是增强信息，读取失败不影响用例结论
+        }
+    }
+
+    /**
+     * 汇总当前执行期的运行诊断（含页面性能与质量信号）。
+     * 公开给 reactLoop 的异常兜底分支复用，避免中断时丢失已采集数据。
+     */
+    buildDiagnostics(): RuntimeDiagnostics {
+        const stepEvents = this.events.filter((e): e is AgentStepEvent => e.type === 'step');
+        const actionRecords = stepEvents.map(e => ({
+            name: e.toolName || 'unknown',
+            durationMs: e.duration,
+            error: !!e.toolError,
+        }));
+
+        // 重复动作：连续两个以上步骤产生相同工具输出时，累计重复次数。
+        let repeatedActionCount = 0;
+        let repeatRun = 0;
+        let prevOutput = '';
+        for (const event of stepEvents) {
+            const output = String(event.toolOutput || '').slice(0, 200);
+            if (output && output === prevOutput) repeatRun += 1;
+            else repeatRun = 0;
+            repeatedActionCount += repeatRun;
+            prevOutput = output;
+        }
+
+        return buildRuntimeDiagnostics({
+            totalMs: this._executeStartedAt ? Date.now() - this._executeStartedAt : 0,
+            aiReasoningMs: this._aiReasoningMs,
+            actionMs: this._actionMs,
+            actions: actionRecords,
+            consoleRecords: this._browserDiagnostics,
+            networkRecords: this._networkDiagnostics,
+            repeatedActionCount,
+            pageMetrics: this._lastPageMetrics,
+            aiUsage: this._aiUsage,
+        });
+    }
+
+    /** 累加单次 LLM 调用的 token 用量（重试中的失败请求不在返回结果里，无法计量） */
+    private recordAiUsage(usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedTokens?: number; reasoningTokens?: number }): void {
+        if (!usage) return;
+        this._aiUsage.llmCalls = (this._aiUsage.llmCalls || 0) + 1;
+        this._aiUsage.promptTokens = (this._aiUsage.promptTokens || 0) + (usage.promptTokens || 0);
+        this._aiUsage.completionTokens = (this._aiUsage.completionTokens || 0) + (usage.completionTokens || 0);
+        this._aiUsage.totalTokens = (this._aiUsage.totalTokens || 0) + (usage.totalTokens || 0);
+        if (usage.cachedTokens !== undefined) {
+            this._aiUsage.cachedTokens = (this._aiUsage.cachedTokens || 0) + usage.cachedTokens;
+        }
+        if (usage.reasoningTokens !== undefined) {
+            this._aiUsage.reasoningTokens = (this._aiUsage.reasoningTokens || 0) + usage.reasoningTokens;
+        }
     }
 
     private assembleUserPrompt(
@@ -730,34 +947,35 @@ export class KevePageAgent {
         };
     }
 
-    /** Save screenshot buffer to test artifacts (reuses already-captured buffer) */
-    private saveScreenshotBuffer(buf: Buffer, stepIndex: number, stepName: string): string | undefined {
-        const taskDir = process.env.KEVE_TASK_DIR || '.keve';
-        const round = process.env.KEVE_ROUND || 'latest';
-        const screenshotsDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
-        fs.mkdirSync(screenshotsDir, { recursive: true });
-        const safeName = stepName.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_').slice(0, 30);
-        const file = path.join(screenshotsDir, `agent-step${stepIndex}-${safeName}-${Date.now()}.png`);
-        fs.writeFileSync(file, buf);
-        return path.relative(taskDir, file);
+    /**
+     * Save screenshot base64 to test artifacts.
+     *
+     * 落盘能力由宿主注入：Playwright 侧写本地文件系统，Cypress 侧经 HTTP 桥落盘。
+     */
+    private async saveScreenshotBuffer(
+        pngBase64: string,
+        stepIndex: number,
+        stepName: string,
+    ): Promise<string | undefined> {
+        if (!this.saveScreenshotFn) return undefined;
+        try {
+            return await this.saveScreenshotFn(pngBase64, stepIndex, stepName);
+        } catch {
+            return undefined;
+        }
     }
 
     /** Load initial screenshots (goal-before + fn-after) as ContentItem[] for step 0 multimodal input */
-    private loadInitialScreenshots(options?: AgentOptions): ContentItem[] {
-        const items: ContentItem[] = [];
-        const taskDir = process.env.KEVE_TASK_DIR || '.keve';
-        for (const relPath of [options?.goalScreenshotBefore, options?.fnAfterScreenshot]) {
-            if (!relPath) continue;
-            try {
-                const absPath = path.resolve(taskDir, relPath);
-                const buf = fs.readFileSync(absPath);
-                items.push({
-                    type: 'image_url',
-                    image_url: { url: `data:image/png;base64,${buf.toString('base64')}`, detail: 'high' },
-                });
-            } catch { /* non-critical */ }
+    private async loadInitialScreenshots(options?: AgentOptions): Promise<ContentItem[]> {
+        if (!this.loadInitialImagesFn) return [];
+        try {
+            return (await this.loadInitialImagesFn({
+                goalScreenshotBefore: options?.goalScreenshotBefore,
+                fnAfterScreenshot: options?.fnAfterScreenshot,
+            })) as ContentItem[];
+        } catch {
+            return [];
         }
-        return items;
     }
 
     /**
@@ -803,6 +1021,7 @@ IMPORTANT: Respond in Chinese.`,
                     execute: async (args: any) => args,
                 },
             }, this.abortController.signal, { toolChoiceName: 'LocateResult' });
+            this.recordAiUsage(result.usage);
 
             const parsed = result.toolCall.args as { bbox: number[]; analysis: string };
             const bbox = parsed.bbox || [];
@@ -858,6 +1077,7 @@ IMPORTANT:
                     execute: async (args: any) => args,
                 },
             }, this.abortController.signal, { toolChoiceName: 'AssertResult' });
+            this.recordAiUsage(result.usage);
 
             const parsed = result.toolCall.args as { passed: boolean; reasoning: string };
             return {
@@ -886,7 +1106,18 @@ IMPORTANT:
             .filter((e): e is AgentStepEvent => e.type === 'step')
             .filter(e => e.screenshotPath)
             .map(e => e.screenshotPath!);
-        return { success, data, events: this.events, finalSnapshot: snapshot, /* refinePatch, */ agentScreenshots: screenshotPaths.length ? screenshotPaths : undefined };
+
+        const diagnostics = this.buildDiagnostics();
+
+        return {
+            success,
+            data,
+            events: this.events,
+            finalSnapshot: snapshot,
+            diagnostics,
+            /* refinePatch, */
+            agentScreenshots: screenshotPaths.length ? screenshotPaths : undefined,
+        };
     }
 }
 
@@ -897,7 +1128,9 @@ IMPORTANT:
  * Creates a KevePageAgent, runs it, and maps the result.
  */
 export async function reactLoop(
-    page: Page,
+    // 接受原生 Playwright Page 或任意 AgentPage 实现（用 toAgentPage 的参数类型
+    // 表达，避免在浏览器安全模块里引入 @playwright/test 的类型依赖）
+    page: Parameters<typeof toAgentPage>[0],
     step: string,
     expected: string,
     options: {
@@ -909,17 +1142,24 @@ export async function reactLoop(
         signal?: AbortSignal;
         goalScreenshotBefore?: string;
         fnAfterScreenshot?: string;
-    } = {},
+    } & AgentHostOptions = {},
 ): Promise<{
     actions: any[];
     expectedMet: boolean;
     conclusion?: 'pass' | 'fail' | 'blocked';
     finalSnapshot: string;
+    diagnostics?: RuntimeDiagnostics;
     // refinePatch?: string; // 已注释：scriptRefine 已禁用
     agentScreenshots?: string[];
 }> {
-    const agent = new KevePageAgent(page, {
+    const agent = new KevePageAgent(toAgentPage(page), {
         maxSteps: options.maxSteps ?? 20,
+        systemPrompt: options.systemPrompt,
+        targetUrl: options.targetUrl,
+        getEnv: options.getEnv,
+        saveScreenshot: options.saveScreenshot,
+        loadInitialImages: options.loadInitialImages,
+        llm: options.llm,
         hooks: {
             onAfterTask: async (_agent, result) => {
                 const partial: Partial<AgentResult> = {};
@@ -976,6 +1216,7 @@ export async function reactLoop(
             stepCount: partialEvents.length,
             finalSnapshot: '',
             events: agent.events,
+            diagnostics: agent.buildDiagnostics(),
             agentScreenshots: agent.events
                 .filter((e): e is AgentStepEvent => e.type === 'step')
                 .filter(e => e.screenshotPath)
@@ -1004,6 +1245,7 @@ export async function reactLoop(
         expectedMet: result.success,
         conclusion: (result as any).conclusion,
         finalSnapshot: result.finalSnapshot,
+        diagnostics: result.diagnostics,
         // refinePatch: result.refinePatch, // 已注释：scriptRefine 已禁用
         agentScreenshots: result.agentScreenshots,
     };

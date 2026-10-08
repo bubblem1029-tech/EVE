@@ -1,11 +1,11 @@
 /**
  * keve-test — Playwright test fixture: keveGoal (唯一操作原语)
  *
- * keveGoal 执行 fn 后 → 截图+fn逻辑+expected → AI判断是否一致
- *   一致     → 通过
- *   不一致   → AI 告诉你还差什么 → Re-Act 探索 → 探索成功
+ * keveGoal 执行 fn 后 → 截图+fn逻辑+expected → Agent Re-Act 观察页面后给最终结论
  *   fn 无    → Re-Act 直接探索
+ *   fn 成功  → 仍进 Re-Act，确认预期达成并产出推理轨迹
  *   fn 异常  → Re-Act 自愈
+ *   确定性事实（环境阻断 / 页面已关闭 / 截图差异超阈值）→ 短路，不烧 token
  *
  * keveAssert 已被吸收：keveGoal 的 expected 即断言语义
  *
@@ -23,25 +23,30 @@
  */
 
 import { test as base, expect, chromium } from '@playwright/test';
-import { sceneGoalsMap, type KeveGoalMeta } from './keve-registry';
-import { reactLoop } from '../page-agent/agent';
-import { keveAspect, type GoalContext, type GoalResult } from './keve-aspect';
-import { learnedActions } from './learned-actions';
+import { sceneGoalsMap, type KeveGoalMeta } from '../core/decorator/keve-registry.js';
+import { reactLoop } from '../page-agent/agent.js';
+import type { ContentItem } from '@kkeve/core/llm';
+import { keveAspect, type GoalContext, type GoalResult } from '../core/decorator/keve-aspect.js';
+import { learnedActions } from '../core/learned-actions.js';
+import { loadConfig } from '../config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-// ─── CDP Mode ──────────────────────────────────────────────────────
-// CDP 连接逻辑已移到 global-setup.ts，通过全局变量共享 Browser 对象
-import { isCdpMode, getCdpBrowser } from './global-setup';
+// ─── 登录态注入 ─────────────────────────────────────────────────────
+// 不再由测试侧启动浏览器 / CDP 接管。登录 cookie 由服务端解析后随环境变量下发，
+// 这里只负责在启动浏览器前把 storageState 就位（global-setup 已写好文件）。
+import { resolveStorageStatePath, writeStorageState, readInjectedCookies } from './global-setup.js';
+import { beginGoalShotDiffCapture, drainGoalShotDiff, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
+import { isAssertionFailure, isEnvironmentBlockedError } from '../core/judge/goal-heuristics.js';
 
 export { expect };
-export { keveModel, keveScene, getModelScenes } from './keve-decorators';
-export type { KeveSceneMeta } from './keve-decorators';
-export { sceneCodeMap, sceneEvalMetaMap } from './keve-registry';
-export type { KeveEvalMeta, ErrorCategory } from './keve-registry';
+export { keveModel, keveScene, getModelScenes } from '../core/decorator/keve-decorators.js';
+export type { KeveSceneMeta, KeveModelOptions, KeveSceneOptions } from '../core/decorator/keve-decorators.js';
+export { sceneCodeMap, sceneEvalMetaMap, sceneMetaMap } from '../core/decorator/keve-registry.js';
+export type { KeveEvalMeta, ErrorCategory, KeveSceneStaticMeta } from '../core/decorator/keve-registry.js';
 
 // Re-export goal metadata for consumer convenience
-export { sceneGoalsMap, type KeveGoalMeta } from './keve-registry';
+export { sceneGoalsMap, type KeveGoalMeta } from '../core/decorator/keve-registry.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -54,6 +59,8 @@ export interface KeveGoalCallOptions {
 type KeveFixture = {
   keveGoal: (options: KeveGoalCallOptions, fn?: () => Promise<void>) => Promise<void>;
   keveReadDoc: (url: string, options?: { noImages?: boolean; outputPath?: string }) => Promise<any>;
+  /** 引擎适配器：engine.click/type/hover/assertVisible 等，引擎无关操作 */
+  engine: import('./engineAdapter.js').EngineAdapter;
   /** 将内置 testInfo 包装为可解构 fixture，允许脚本直接写 { page, keveGoal, testInfo } */
   testInfo: import('@playwright/test').TestInfo;
 };
@@ -82,56 +89,53 @@ keveAspect.register({
 export const test = base.extend<KeveFixture>({
   // ── 将内置 testInfo 包装为可解构 fixture ─────────────────────────
   // 测试方法可直接写 { page, keveGoal, testInfo }，不再报 "unknown parameter" 错误
+  // ── engine: 引擎无关操作适配器 ──────────────────────────────────────
+  engine: async ({ page }, use) => {
+    const { createEngine } = await import('./engineAdapter.js');
+    const engine = createEngine(page);
+    await use(engine);
+  },
+
   testInfo: async ({ }, use, testInfo) => {
     await use(testInfo);
   },
 
   browser: async ({ }, use, testInfo) => {
-    if (isCdpMode()) {
-      const browser = await getCdpBrowser(); // 复用全局共享的 CDP browser
-      if (browser) {
-        await use(browser);
-        // CDP 模式下不关闭浏览器（共享连接，关闭会影响后续用例）
-      } else {
-        // CDP 不可达 → graceful fallback 到独立启动浏览器
-        console.log(`[keve-test] CDP unavailable, falling back to chromium.launch()`);
-        const fallback = await chromium.launch(
-          testInfo.project?.use?.launchOptions as any || {},
-        );
-        await use(fallback);
-        await fallback.close();
-      }
-    } else {
-      const browser = await chromium.launch(
-        testInfo.project?.use?.launchOptions as any || {},
-      );
-      await use(browser);
-      await browser.close();
-    }
+    const browser = await chromium.launch(
+      testInfo.project?.use?.launchOptions as any || {},
+    );
+    await use(browser);
+    await browser.close();
   },
 
-  page: async ({ browser }, use) => {
-    const isCdp = isCdpMode() && browser.isConnected();
-    if (isCdp) {
-      const contexts = browser.contexts();
-      const cdpContext = contexts.length > 0 ? contexts[0] : await browser.newContext();
-      // CDP 模式：优先复用已有 page（保留登录状态），仅在无可用 page 时新开
-      const existingPages = cdpContext.pages();
-      let page;
-      if (existingPages.length > 0) {
-        // 复用第一个非 about:blank 的 page（通常是用户已登录的 tab）
-        page = existingPages.find(p => p.url() !== 'about:blank') || existingPages[0];
-        // 导航到 about:blank 作为起始页（清空之前的状态，但保留 cookie）
-        try { await page.goto('about:blank', { timeout: 3000 }); } catch { /* ignore */ }
-      } else {
-        page = await cdpContext.newPage();
-      }
-      await use(page);
-      // CDP 模式下不关闭 page（保留浏览器 tab 给下一个用例复用）
-    } else {
-      const page = await browser.newPage();
-      await use(page);
-      await page.close();
+  page: async ({ browser }, use, testInfo) => {
+    // 建 context 时带上 storageState（服务端 cookies 写入的登录态），
+    // 裸 newPage() 会丢失 cookies 导致用例未登录失败。
+    // global-setup 正常会先写好；直接裸跑 playwright test 时这里兜底就地生成。
+    let storageState = testInfo.project?.use?.storageState as string | undefined;
+    if (!storageState && readInjectedCookies().length > 0) {
+      storageState = resolveStorageStatePath();
+      try { writeStorageState(storageState); } catch { /* 写失败则裸跑，用例会自行暴露登录问题 */ }
+    }
+    // 视频录制：playwright config use.video = { mode:'on', dir } → recordVideo
+    //（自定义 context 不会自动附加视频附件，需在 context 关闭后显式 attach）
+    const videoOpt = (testInfo as any).project?.use?.video as any;
+    const videoOn = !!videoOpt && (videoOpt === 'on' || videoOpt.mode === 'on' || videoOpt.mode === 'retain-on-failure');
+    const context = await browser.newContext({
+      storageState,
+      ...(videoOn ? { recordVideo: { dir: typeof videoOpt === 'object' && videoOpt.dir ? videoOpt.dir : undefined } } : {}),
+    });
+    const page = await context.newPage();
+    await use(page);
+    const video = page.video();
+    await page.close();
+    await context.close();
+    // 视频文件在 context 关闭后才定稿：显式挂附件 → results.json attachments
+    if (video) {
+      try {
+        const videoPath = await video.path();
+        await testInfo.attach('video', { path: videoPath });
+      } catch { /* 无视频不阻塞 */ }
     }
   },
 
@@ -177,13 +181,18 @@ export const test = base.extend<KeveFixture>({
       const fnSource = fn?.toString() || undefined;
 
       let fnError: string | undefined;
+      let fnErrorRaw: any; // 原始错误对象（ScreenshotDiffError 等带结构的错误需要保留结构）
+      let fnResult: any; // fn 返回值透传（flow 产物，如 createDashboard 的看板名）
       let fnBlocked: boolean = false; // true when fn error is environment-blocked (skip agent Re-Act)
+      // 截图对比：fn 前开缓冲、fn 后收集 —— engine.expectScreenshot 的结果经此进 attachment
+      beginGoalShotDiffCapture();
       if (fn) {
         try {
-          await fn();
+          fnResult = await fn();
           console.log(`[keveGoal] "${options.step}" fn executed`);
         } catch (err: any) {
           fnError = err?.message || String(err);
+          fnErrorRaw = err;
           console.log(`[keveGoal] "${options.step}" fn error: ${fnError}`);
           // ── Detect environment-blocked errors: skip Agent Re-Act, directly BLOCKED ──
           // When fn fails due to empty URL, connection refused, timeout, or navigation to invalid URL,
@@ -192,8 +201,24 @@ export const test = base.extend<KeveFixture>({
           if (fnBlocked) {
             console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — environment error detected, skipping agent Re-Act`);
           }
+          // ── Detect page-level permission block (forbidden / unauthorized) ──
+          // When the page redirected to a forbidden/unauthorized URL (e.g. kwaibi /pc/dashboard/forbidden),
+          // the fn error is typically a locator timeout — but the root cause is access denial,
+          // not a missing element. Mark as blocked and annotate the error for accurate reporting.
+          if (!fnBlocked && fnError) {
+            try {
+              const blockedUrl = page.url();
+              if (/\/forbidden|\/unauthorized|\/403|\/no-permission/i.test(blockedUrl)) {
+                fnBlocked = true;
+                fnError = `页面访问被阻断（当前 URL=${blockedUrl}），目标元素未渲染 — 权限或数据问题，非用例缺陷`;
+                console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — page redirected to forbidden/unauthorized: ${blockedUrl}`);
+              }
+            } catch { /* page.url() may fail if page is closed */ }
+          }
         }
       }
+      // fn 结束（无论成败）即取出本 goal 的对比结果；不再有引擎路径会往里写
+      const shotDiffs = drainGoalShotDiff();
 
       // ── Capture fn-after screenshot (fn 执行后的页面状态，传给 agent 说明执行前后) ──
       let fnAfterScreenshot = '';
@@ -243,6 +268,22 @@ export const test = base.extend<KeveFixture>({
             agentScreenshots: [],
             conclusion: 'blocked',
           };
+        } else if (fnErrorRaw instanceof ScreenshotDiffError) {
+          // ── 截图对比超阈值：确定性事实，跳过 Agent Re-Act ──
+          // diff 不是探索能修复的（页面就该和基线不一样才报错），探索只会烧 token；
+          // 对比结果已入 shotDiffs，attachment 会带上完整差异证据。
+          console.log(`[keveGoal] 📊 "${options.step}" screenshot diff exceeded — skipping agent Re-Act`);
+          reactResult = {
+            expectedMet: false,
+            actions: [{
+              action: { tool: 'done', verdict: 'fail', text: fnError },
+              toolOutput: fnErrorRaw.shotDiff?.message || '',
+              result: 'ok',
+            }],
+            finalSnapshot: '',
+            agentScreenshots: [],
+            conclusion: 'fail' as const,
+          };
         } else {
         // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
         // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
@@ -266,6 +307,11 @@ export const test = base.extend<KeveFixture>({
               signal: goalTimeoutController.signal,
               goalScreenshotBefore: goalScreenshotBefore || undefined,
               fnAfterScreenshot: fnAfterScreenshot || undefined,
+              targetUrl: process.env.KEVE_TARGET_URL || '',
+              getEnv: (name: string) => process.env[name] || '',
+              saveScreenshot: saveAgentScreenshot,
+              loadInitialImages: loadInitialImages,
+              llm: reactLlmConfig(),
             },
           );
         } catch (reactErr: any) {
@@ -281,6 +327,7 @@ export const test = base.extend<KeveFixture>({
             finalSnapshot: '',
             agentScreenshots: [],
             conclusion: isGoalTimeout ? 'blocked' : 'fail',
+            diagnostics: undefined,
           };
         } finally {
           clearTimeout(goalTimeout);
@@ -309,12 +356,17 @@ export const test = base.extend<KeveFixture>({
           ? undefined
           : reactResult.conclusion === 'blocked'
             ? new Error(`Blocked: ${fnBlocked ? fnError : (reactTimedOut ? `Agent 超时 (300000ms)` : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked'))}`)
-            : (fnError && isAssertionFailure(fnError) && !fnBlocked)
-              ? new Error(`Assertion failed: ${fnError}`)
-              : new Error(`Expected not achieved: ${options.expected}`),
+            : (fnErrorRaw instanceof ScreenshotDiffError)
+              ? new Error(fnError) // 截图对比：保留带差异率/区块数/基线版本的结构化错误文案
+              : (fnError && isAssertionFailure(fnError) && !fnBlocked)
+                ? new Error(`Assertion failed: ${fnError}`)
+                : new Error(`Expected not achieved: ${options.expected}`),
       } as any;
       // Attach Agent conclusion for downstream consumers
       if (reactResult.conclusion) (result as any).conclusion = reactResult.conclusion;
+      // Attach runtime diagnostics for downstream consumers (Playwright side must
+      // copy them here because the attachment reads from `result`).
+      if (reactResult.diagnostics) (result as any).diagnostics = reactResult.diagnostics;
       console.log(reactResult.expectedMet
         ? `[keveGoal] ✅ "${options.step}" PASSED`
         : `[keveGoal] ❌ "${options.step}" FAILED (${reactResult.conclusion || 'fail'}) — ${result.error?.message || 'expected not achieved'}`);
@@ -402,9 +454,16 @@ export const test = base.extend<KeveFixture>({
           }),
           finalSnapshot: result.finalSnapshot ? String(result.finalSnapshot).slice(0, 500) : undefined,
           diagnosticHints,
+          diagnostics: (result as any).diagnostics,
           goalScreenshotBefore: goalScreenshotBefore || undefined,
           goalScreenshotAfter: goalScreenshotAfter || undefined,
-          agentScreenshots: (result as any).agentScreenshots || [],
+          // agent 未单独留图时，用 fn-after 兜底，保证报告至少有一张执行后截图。
+          // 不能写 `|| [...]`：空数组是 truthy，会把兜底截图短路丢弃。
+          agentScreenshots: (result as any).agentScreenshots?.length
+            ? (result as any).agentScreenshots
+            : (fnAfterScreenshot ? [fnAfterScreenshot] : []),
+          // 截图对比证据（matched/created/exceeded 全量保留；平台 stepsDetail 回收为 evidence.screenshotDiff）
+          screenshotDiff: shotDiffs.length ? shotDiffs : undefined,
           // refinePatch: (result as any).refinePatch || undefined, // 已注释：scriptRefine 已禁用
           conclusion: (result as any).conclusion || undefined,
         }), 'utf-8'),
@@ -419,6 +478,9 @@ export const test = base.extend<KeveFixture>({
         console.log(`[keveGoal] ❌ "${options.step}" FAILED — reason: ${failReason}`);
         throw result.error || new Error(`keveGoal "${options.step}" failed: ${failReason}`);
       }
+      // 透传 fn 返回值：flow 辅助函数（如 createDashboard 返回看板名）可包进 keveGoal，
+      // 脚本失败时由 Agent Re-Act 自愈，成功时把产物继续传给后续步骤
+      return fnResult;
     };
 
     await use(keveGoalFn);
@@ -430,139 +492,13 @@ export const test = base.extend<KeveFixture>({
 });
 
 // Register extended test with keve-decorators so @keveModel uses the correct test
-import { setKeveTest } from './keve-decorators';
+import { setKeveTest } from '../core/decorator/keve-decorators.js';
 setKeveTest(test);
 
 // ── 辅助函数 ──
 
 /**
- * Detect environment-blocked errors from fn execution.
- *
- * When fn (deterministic script) fails with these patterns, Agent Re-Act cannot
- * fix the issue — the error is environmental, not application-level:
- *
- * 1. Empty/undefined URL → page.goto(''), page.goto(undefined)
- * 2. Connection refused / net::ERR_CONNECTION_REFUSED
- * 3. Navigation timeout (page not reachable)
- * 4. Invalid URL format
- * 5. SSO redirect / auth failure (not the app's fault)
- *
- * Returns true → keveGoal skips Agent Re-Act and directly reports BLOCKED
- * with the fn error as the blocking reason.
- */
-function isEnvironmentBlockedError(err: any): boolean {
-  const msg = (err?.message || String(err)).toLowerCase();
-
-  // Empty/undefined URL: page.goto('') or page.goto(undefined)
-  if (msg.includes('url must not be empty') || msg.includes('url is empty')
-    || msg.includes('invalid url') || msg.includes('url is undefined')
-    || msg.includes('navigation to ""') || msg.includes("navigation to ''")) {
-    return true;
-  }
-
-  // page.goto(undefined): Playwright type error "url: expected string, got undefined"
-  // This happens when process.env.PAGE_* is not set — environment config issue, not app issue
-  if ((msg.includes('expected string') || msg.includes('expected a string'))
-    && (msg.includes('got undefined') || msg.includes('got null') || msg.includes('received undefined'))) {
-    return true;
-  }
-
-  // Connection refused / network unreachable
-  if (msg.includes('err_connection_refused') || msg.includes('connection refused')
-    || msg.includes('net::err_connection') || msg.includes('err_name_not_resolved')
-    || msg.includes('err_address_unreachable') || msg.includes('err_internet_disconnected')
-    || msg.includes('err_connection_timed_out') || msg.includes('err_connection_reset')) {
-    return true;
-  }
-
-  // Navigation timeout (page not reachable in time)
-  if (msg.includes('navigation timeout of') || msg.includes('timeout of') && msg.includes('exceeded')
-    || msg.includes('page.goto: timeout') || msg.includes('navigating to') && msg.includes('timed out')) {
-    return true;
-  }
-
-  // Playwright locator/waitForSelector timeout — selector not found on page (fn script issue, not app crash)
-  // e.g. "Timeout 15000ms exceeded while waiting for locator('.selector') to be visible"
-  // This is a script-quality issue (wrong selector), not an env blocked error.
-  // Return false here — let Agent take over rather than treating as BLOCKED.
-  // Note: we intentionally do NOT return true; these should fall through to Agent Re-Act.
-
-  // IDC network segment restriction
-  if (msg.includes('unable to access on the idc network segment')
-    || msg.includes('idc network segment') || msg.includes('40314')) {
-    return true;
-  }
-
-  // SSO / auth redirect (not the app's fault)
-  if (msg.includes('sso redirect') || msg.includes('login redirect detected')
-    || msg.includes('err_too_many_redirects')) {
-    return true;
-  }
-
-  // Page/context/browser closed — dead page, Agent cannot explore
-  // e.g. "page.waitForLoadState: Target page, context or browser has been closed"
-  // e.g. "page.ariaSnapshot: Target page, context or browser has been closed"
-  // When the CDP connection drops or the user closes the tab, any page API throws this.
-  // Agent Re-Act on a dead page is a waste of time → BLOCKED immediately.
-  if (msg.includes('target page, context or browser has been closed')
-    || msg.includes('page has been closed') || msg.includes('browser has been closed')
-    || msg.includes('context has been closed')) {
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * Detect assertion failures from fn execution (Expected/Received patterns).
- *
- * When fn (deterministic script) throws a hard assertion failure with concrete
- * Expected vs Received values, the mismatch is a *fact*, not a judgment.
- * The Agent may rationalize "consistency" (e.g. "both pages show 15px → consistent → pass")
- * and override to pass, but 15px ≠ 16px is a definitive failure.
- *
- * This function identifies such assertion failures so keveGoal can:
- *   - Override Agent "pass" → "fail" when the fn proved a value mismatch
- *   - Use the precise assertion message in the error (instead of generic "expected not achieved")
- *
- * Returns true for assertion errors, false for environment/runtime errors.
- */
-function isAssertionFailure(error: string): boolean {
-  const msg = (error || '').toLowerCase();
-
-  // Exclude Playwright API type errors (parameter type mismatch, not value assertion)
-  // e.g. "page.goto: url: expected string, got undefined" — this is an env config error,
-  // not a functional assertion failure. isEnvironmentBlockedError() handles it instead.
-  if (msg.includes('expected string') || msg.includes('expected a string')
-    || msg.includes('expected number') || msg.includes('expected boolean')) {
-    // Only exclude if it looks like an API parameter error (not an assertion)
-    if (msg.includes('got undefined') || msg.includes('got null')
-      || msg.includes('received undefined') || msg.includes('received null')) {
-      return false;
-    }
-  }
-
-  // Jest/Vitest/playwright assertion: "Expected: X, Received: Y"
-  if (msg.includes('expected') && msg.includes('received')) return true;
-
-  // AssertionError / assert keyword
-  if (msg.includes('assertionerror') || msg.includes('assertion failed')
-    || msg.includes('assertion error')) return true;
-
-  // expect(x).toBe(y) / expect(x).toEqual(y) pattern
-  // Note: must NOT match Playwright timeout messages like "Timeout 15000ms exceeded waiting for locator(...) to be visible"
-  // Those are env/timeout errors, not value assertion failures.
-  if ((msg.includes(' to be ') && !msg.includes('timeout') && !msg.includes('waiting for') && !msg.includes('exceeded'))
-    || msg.includes(' to equal ') || msg.includes(' to deeply equal ')) return true;
-
-  // Playwright expect: "expected string, received number" etc.
-  if (msg.includes('expected ') && (msg.includes(' but ') || msg.includes(' got ') || msg.includes(' received '))) return true;
-
-  return false;
-}
-
-/**
- * 截图并保存到 test-artifacts，返回相对 taskDir 的路径
+ * 截图并保存到当前轮次的 reports/round-N，返回相对 taskDir 的路径
  * @param phase 'before' | 'after-fn' — 用于文件名前缀
  */
 async function captureScreenshot(
@@ -572,12 +508,84 @@ async function captureScreenshot(
   phase: 'before' | 'after-fn',
 ): Promise<string> {
   const buf = await page.screenshot({ type: 'png', timeout: 15000 });
+  const safeName = stepName.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 30);
+  return writeScreenshot(buf, `goal-${phase}-${order}-${safeName}`);
+}
+
+/**
+ * 当前轮次截图目录绝对路径（与 Cypress 桥同名同层）。
+ * 新布局为 <taskRoot>/reports/round-N/screenshots；缺失时回退旧布局，
+ * 兼容历史执行环境。
+ */
+function screenshotsDir(): string {
+  if (process.env.KEVE_RESULT_DIR) {
+    return path.join(path.resolve(process.env.KEVE_RESULT_DIR), 'screenshots');
+  }
   const taskDir = process.env.KEVE_TASK_DIR || '.keve';
   const round = process.env.KEVE_ROUND || 'latest';
-  const screenshotsDir = path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
-  fs.mkdirSync(screenshotsDir, { recursive: true });
-  const safeName = stepName.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 30);
-  const file = path.join(screenshotsDir, `goal-${phase}-${order}-${safeName}-${Date.now()}.png`);
-  fs.writeFileSync(file, buf);
+  return path.join(taskDir, 'test-artifacts', `round-${round}`, 'screenshots');
+}
+
+/** 落盘 PNG，返回相对 taskDir 的路径 */
+function writeScreenshot(png: Buffer, baseName: string): string {
+  const taskDir = process.env.KEVE_TASK_DIR || '.keve';
+  const dir = screenshotsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${baseName}-${Date.now()}.png`);
+  fs.writeFileSync(file, png);
   return path.relative(taskDir, file);
+}
+
+/** Agent 单步截图落盘（宿主注入给 reactLoop，与 Cypress 桥的命名同形） */
+async function saveAgentScreenshot(
+  pngBase64: string,
+  stepIndex: number,
+  stepName: string,
+): Promise<string | undefined> {
+  const safeName = stepName.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 30);
+  return writeScreenshot(Buffer.from(pngBase64, 'base64'), `agent-step${stepIndex}-${safeName}`);
+}
+
+/** 读取 goal-before / fn-after 图片，转成多模态 ContentItem（唯一注意：路径是相对 taskDir） */
+async function loadInitialImages(paths: {
+  goalScreenshotBefore?: string;
+  fnAfterScreenshot?: string;
+}): Promise<ContentItem[]> {
+  const taskDir = process.env.KEVE_TASK_DIR || '.keve';
+  const items: ContentItem[] = [];
+  for (const [label, rel] of [
+    ['goal-before', paths.goalScreenshotBefore],
+    ['fn-after', paths.fnAfterScreenshot],
+  ] as const) {
+    if (!rel) continue;
+    try {
+      const file = path.isAbsolute(rel) ? rel : path.join(taskDir, rel);
+      if (!fs.existsSync(file)) continue;
+      const b64 = fs.readFileSync(file).toString('base64');
+      items.push({ type: 'text', text: `Screenshot (${label}):` });
+      items.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } } as ContentItem);
+    } catch { /* 单张图读失败不影响探索 */ }
+  }
+  return items;
+}
+
+/** Re-Act 的 LLM 配置：优先 keve.yaml，其次进程环境变量（与 config.ts DEFAULT_CONFIG 同源） */
+function reactLlmConfig(): {
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+} {
+  let cfg = { base_url: '', model: '', api_key: '' } as {
+    base_url: string;
+    model: string;
+    api_key?: string;
+  };
+  try {
+    cfg = loadConfig().llm as typeof cfg;
+  } catch { /* 配置缺失时退回环境变量 */ }
+  return {
+    baseURL: cfg.base_url || process.env.KEVE_LLM_BASE_URL || '',
+    model: cfg.model || process.env.KEVE_LLM_MODEL_NAME || process.env.KEVE_LLM_MODEL || '',
+    apiKey: cfg.api_key || process.env.KEVE_LLM_API_KEY || '',
+  };
 }

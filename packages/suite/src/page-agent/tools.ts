@@ -9,11 +9,8 @@
  * - aria-ref selector automatically penetrates iframe boundaries
  */
 
-import type { Page } from '@playwright/test';
 import { z } from 'zod';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import type { KevePageAgent } from './agent';
+import type { KevePageAgent } from './agent.js';
 
 // ─── Tool Definition ──────────────────────────────────────────────────
 
@@ -29,6 +26,133 @@ export interface PageAgentTool<TParams = any> {
 
 export function tool<TParams>(options: PageAgentTool<TParams>): PageAgentTool<TParams> {
     return options;
+}
+
+/** 常见业务 UI 的弹窗容器（dialog / message-box / modal）。 */
+const DIALOG_ROOT_SELECTOR = [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '.ks-dialog',
+    '.el-dialog',
+    '.el-message-box',
+    '.ant-modal',
+    '.ant-modal-confirm',
+    '[class*="message-box"]',
+    '[class*="confirm-dialog"]',
+].join(', ');
+
+/**
+ * 取当前最上层可见弹窗的文本与按钮。返回空时说明没有可见弹窗。
+ * 通过 page.evaluate 直接跑在浏览器上下文，Playwright/Cypress 共用同一实现。
+ */
+async function currentDialogInfo(page: any): Promise<{ text: string; buttons: string[] } | null> {
+    try {
+        const selectors = DIALOG_ROOT_SELECTOR.split(',').map(s => s.trim()).filter(Boolean);
+        const result = await page.evaluate(`(() => {
+            var selectors = ${JSON.stringify(selectors)};
+            var seen = [];
+            for (var i = 0; i < selectors.length; i += 1) {
+                var nodes = Array.prototype.slice.call(document.querySelectorAll(selectors[i]));
+                for (var j = 0; j < nodes.length; j += 1) seen.push(nodes[j]);
+            }
+            var visible = [];
+            for (var k = 0; k < seen.length; k += 1) {
+                var el = seen[k];
+                if (!el || !el.getBoundingClientRect) continue;
+                var rect = el.getBoundingClientRect();
+                if (!rect.width && !rect.height) continue;
+                var style = window.getComputedStyle(el);
+                if (!style) continue;
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                if (Number(style.opacity) === 0) continue;
+                if (visible.indexOf(el) < 0) visible.push(el);
+            }
+            var root = visible.length ? visible[visible.length - 1] : null;
+            if (!root) return null;
+            var text = String(root.innerText || root.textContent || '').replace(/\\s+/g, ' ').trim();
+            var buttons = [];
+            var candidates = Array.prototype.slice.call(root.querySelectorAll('button, [role="button"], a'));
+            for (var b = 0; b < candidates.length; b += 1) {
+                var btn = candidates[b];
+                if (btn.disabled) continue;
+                var br = btn.getBoundingClientRect();
+                if (!br.width && !br.height) continue;
+                var label = String(btn.textContent || btn.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                if (label && buttons.indexOf(label) < 0) buttons.push(label);
+            }
+            return { text: text.slice(0, 300), buttons: buttons.slice(0, 20) };
+        })()`);
+        if (result && (result.text || result.buttons?.length)) {
+            return { text: String(result.text || ''), buttons: Array.isArray(result.buttons) ? result.buttons.map(String) : [] };
+        }
+        return null;
+    } catch { return null; }
+}
+
+/**
+ * 自动关闭“是否/确认”类弹窗。
+ *
+ * 只有弹窗文本明确包含确认语义时才点正向按钮，避免把普通提示误当操作框；
+ * 点完再检查弹窗是否真正关闭。返回 null 表示不需要/无法自动处理。
+ */
+async function autoConfirmDialog(page: any, info: { text: string; buttons: string[] }): Promise<string | null> {
+    const text = String(info?.text || '');
+    const hasConfirmationWording = /确认|是否|关闭所有|关闭全部|删除|覆盖|确定/.test(text);
+    if (!hasConfirmationWording || !info?.buttons?.length) return null;
+
+    const wantedLabels = ['确定', '确认', '是', '关闭全部', '关闭所有'];
+    const label = wantedLabels.find(l => info.buttons.includes(l));
+    if (!label) return null;
+
+    const clickExpression = `(() => {
+        var selectors = ${JSON.stringify(DIALOG_ROOT_SELECTOR.split(',').map(s => s.trim()).filter(Boolean))};
+        var seen = [];
+        for (var i = 0; i < selectors.length; i += 1) {
+            var nodes = Array.prototype.slice.call(document.querySelectorAll(selectors[i]));
+            for (var j = 0; j < nodes.length; j += 1) seen.push(nodes[j]);
+        }
+        var visible = [];
+        for (var k = 0; k < seen.length; k += 1) {
+            var el = seen[k];
+            if (!el || !el.getBoundingClientRect) continue;
+            var rect = el.getBoundingClientRect();
+            if (!rect.width && !rect.height) continue;
+            var style = window.getComputedStyle(el);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+            if (Number(style.opacity) === 0) continue;
+            if (visible.indexOf(el) < 0) visible.push(el);
+        }
+        var root = visible.length ? visible[visible.length - 1] : null;
+        if (!root) return null;
+        var wanted = ${JSON.stringify(wantedLabels)};
+        var buttons = Array.prototype.slice.call(root.querySelectorAll('button, [role="button"], a'));
+        for (var w = 0; w < wanted.length; w += 1) {
+            for (var b = 0; b < buttons.length; b += 1) {
+                var btn = buttons[b];
+                if (btn.disabled) continue;
+                var label = String(btn.textContent || btn.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim();
+                if (label === wanted[w]) {
+                    if (typeof btn.click === 'function') btn.click();
+                    else btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    return label;
+                }
+            }
+        }
+        return null;
+    })()`;
+
+    try {
+        const clicked = await page.evaluate(clickExpression);
+        if (!clicked) return null;
+        await page.waitForTimeout(600);
+        const after = await currentDialogInfo(page);
+        if (!after) {
+            return `✅ Auto-confirmed blocking dialog via "${clicked}" — dialog closed`;
+        }
+        return `⚠️ Clicked dialog content then auto-confirmed "${clicked}", but dialog still open: "${after.text.slice(0, 80)}". Read the accessibility tree to handle the remaining dialog.`;
+    } catch {
+        return null;
+    }
 }
 
 // ─── Tool Registry ────────────────────────────────────────────────────
@@ -77,7 +201,7 @@ tools.set('click', tool({
         let inDialog = false;
         try {
             const preClickInfo = await locator.evaluate((el: any) => {
-                const dialog = el.closest('[role="dialog"], [role="alertdialog"], .ks-dialog, .el-dialog, .ant-modal');
+                const dialog = el.closest(DIALOG_ROOT_SELECTOR);
                 const role = el.getAttribute('role') || el.tagName.toLowerCase();
                 const name = el.textContent?.trim()?.slice(0, 40) || el.getAttribute('aria-label') || el.getAttribute('title') || '';
                 const isButton = el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' || el.tagName === 'A';
@@ -98,6 +222,16 @@ tools.set('click', tool({
 
         await locator.click({ timeout: 5000, force: true });
         await this.page.waitForTimeout(300);
+
+        // 点击弹窗内容（非按钮）没有自动关闭弹窗时，常见确认框会一直盖住页面；
+        // 这里在 Agent 继续尝试前先扫描弹窗按钮，避免反复 execute_javascript 碰运气。
+        if (inDialog && !dialogContext) {
+            const dialogInfo = await currentDialogInfo(this.page);
+            if (dialogInfo) {
+                const autoResult = await autoConfirmDialog(this.page, dialogInfo);
+                if (autoResult) return autoResult;
+            }
+        }
 
         // Post-click check: if we clicked a dialog button, check if dialog closed
         if (dialogContext) {
@@ -469,14 +603,14 @@ tools.set('navigate', tool({
         // ── Resolve environment variable references (e.g., "process.env.PAGE_BI") ──
         const envRefMatch = url.match(/^process\.env\.(\w+)$/);
         if (envRefMatch) {
-            const envValue = process.env[envRefMatch[1]] || '';
+            const envValue = this.getEnv(envRefMatch[1]);
             if (!envValue) {
                 return `❌ Cannot navigate: environment variable ${envRefMatch[1]} is empty/undefined. This is a test data configuration issue — call done(verdict="blocked") immediately.`;
             }
             url = envValue;
         }
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            const base = process.env.KEVE_TARGET_URL || process.env.BASE_URL || '';
+            const base = this.targetUrl || this.getEnv('BASE_URL');
             if (!base) {
                 return `❌ Cannot navigate: no base URL available (KEVE_TARGET_URL and BASE_URL are both empty). Call done(verdict="blocked") immediately.`;
             }
@@ -577,8 +711,7 @@ tools.set('visual_assert', tool({
         // 1. Capture screenshot
         let screenshotBase64: string;
         try {
-            const buf = await this.page.screenshot({ type: 'png', timeout: 10000 });
-            screenshotBase64 = buf.toString('base64');
+            screenshotBase64 = (await this.page.screenshot({ type: 'png', timeout: 10000 })).base64;
         } catch (e: any) {
             throw new Error(`visual_assert screenshot failed: ${e.message}`);
         }
@@ -603,8 +736,7 @@ tools.set('visual_locate', tool({
         // 1. Capture screenshot
         let screenshotBase64: string;
         try {
-            const buf = await this.page.screenshot({ type: 'png', timeout: 10000 });
-            screenshotBase64 = buf.toString('base64');
+            screenshotBase64 = (await this.page.screenshot({ type: 'png', timeout: 10000 })).base64;
         } catch (e: any) {
             throw new Error(`visual_locate screenshot failed: ${e.message}`);
         }
@@ -617,7 +749,7 @@ tools.set('visual_locate', tool({
         }
 
         // 3. Convert normalized bbox (0-1000) to viewport pixel coordinates
-        const viewport = this.page.viewportSize() || { width: 1280, height: 720 };
+        const viewport = (await this.page.viewportSize()) || { width: 1280, height: 720 };
         const [x1, y1, x2, y2] = locateResult.bbox;
         const centerX = Math.round(((x1 + x2) / 2) * viewport.width / 1000);
         const centerY = Math.round(((y1 + y2) / 2) * viewport.height / 1000);

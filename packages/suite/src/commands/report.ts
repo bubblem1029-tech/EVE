@@ -8,8 +8,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chalk from 'chalk';
-import { findKeveDir, getBranchDir } from '../config';
-import { generateReportData } from '../index';
+import { findKeveDir, getBranchDir } from '../config.js';
+import { generateReportData } from '../index.js';
 
 export interface ReportOptions {
   results?: string;

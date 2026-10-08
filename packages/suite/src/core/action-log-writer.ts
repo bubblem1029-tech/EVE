@@ -44,7 +44,10 @@ export class ActionLogWriter {
 
   constructor(taskDir?: string) {
     const dir = taskDir || process.env.KEVE_TASK_DIR || '.keve';
-    const logDir = path.join(dir, 'test-artifacts', `round-${process.env.KEVE_ROUND || 'latest'}`);
+    // 优先写入 runner 注入的当前轮次目录；缺失时回退旧布局。
+    const logDir = process.env.KEVE_RESULT_DIR
+      ? path.resolve(process.env.KEVE_RESULT_DIR)
+      : path.join(dir, 'test-artifacts', `round-${process.env.KEVE_ROUND || 'latest'}`);
     fs.mkdirSync(logDir, { recursive: true });
     this.filePath = path.join(logDir, 'action-log.jsonl');
   }

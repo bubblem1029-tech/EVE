@@ -5,8 +5,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chalk from 'chalk';
-import { findKeveDir, resolveTaskDir } from '../config';
-import { generatePwConfig, resolveConfigOutputPath, findExistingConfig, type PwConfigOptions } from '../core/pw-config';
+import { findKeveDir, resolveTaskDir } from '../config.js';
+import { generatePwConfig, resolveConfigOutputPath, findExistingConfig, type PwConfigOptions } from '../engine-playwright/pw-config.js';
 
 export interface ConfigOptions {
   baseUrl?: string;

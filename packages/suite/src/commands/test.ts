@@ -6,9 +6,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chalk from 'chalk';
-import { findKeveDir, loadConfig } from '../config';
-import { run, KeveRunError, type RunOptions } from './run';
-import { report, type ReportOptions } from './report';
+import { findKeveDir, loadConfig } from '../config.js';
+import { run, KeveRunError, type RunOptions } from './run.js';
+import { report, type ReportOptions } from './report.js';
 
 export interface TestOptions {
   config?: string;
