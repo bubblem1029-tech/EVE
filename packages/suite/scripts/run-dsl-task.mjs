@@ -406,23 +406,68 @@ function readReportData(resultDir) {
 
 /**
  * 目标地址解析：优先使用用例 OPEN_PAGE 中的真实业务地址。
- * 只有 DSL 里的地址是本机占位地址，或 DSL 没有可用地址时，才使用
- * 调度入参 / 环境映射，避免 env=rc 覆盖用例明确声明的目标站点。
+ * 只有 DSL 里的地址是本机占位地址，或 DSL 没有可用地址时，才使用调度入参。
+ * 不做任何环境映射兜底——用例指定什么页面就访问什么页面，不私自替换为平台域名。
+ *
+ * 支持三种 OPEN_PAGE value 格式：
+ *  1. 字符串：直接用
+ *  2. { url } / { value }：取对应字段
+ *  3. { type: 'VARIABLE', value: varId, variable: [{key,value}] }：
+ *     从 variableList 查出对应环境的 URL，再应用 step.variable 改写
  */
 function deriveTargetUrl(input, cases) {
+  const env = String(input?.env || 'test');
   for (const item of cases) {
+    const variableList = Array.isArray(item.variableList) ? item.variableList : [];
     for (const raw of Array.isArray(item?.dslList) ? item.dslList : []) {
       const step = normalizeStep(raw);
       if (String(step?.operation || '') !== 'OPEN_PAGE') continue;
       const value = step.value;
-      const candidate = typeof value === 'string'
-        ? value
-        : value?.url || value?.value || '';
-      const candidateUrl = String(candidate || '').trim();
-      if (!/^https?:\/\//i.test(candidateUrl)) continue;
-      if (isLocalPlaceholderUrl(candidateUrl)) {
-        continue;
+      let candidateUrl = '';
+      if (typeof value === 'string') {
+        candidateUrl = value.trim();
+      } else if (value && typeof value === 'object') {
+        if (value.type === 'VARIABLE' && variableList.length) {
+          // 变量库引用：按 id 查找变量行，取对应环境列
+          const varId = value.value;
+          const row = variableList.find((r) => String(r.id) === String(varId));
+          if (row) {
+            const cols = [env, 'test', 'online', 'rc', 'pre'];
+            const isUrl = (x) => typeof x === 'string' && /^https?:\/\//i.test(x.trim());
+            const isPlaceholder = (x) => /^(1|0|true|false)$/i.test(String(x ?? '').trim());
+            let base = '';
+            for (const c of cols) { if (isUrl(row[c])) { base = row[c]; break; } }
+            if (!base) {
+              for (const c of cols) {
+                const v = row[c];
+                if (typeof v === 'string' && v.trim() && !isPlaceholder(v)) { base = v; break; }
+              }
+            }
+            if (base) {
+              // 应用 step.variable 改写（与 buildVariableUrl 同逻辑）
+              const kv = new Map();
+              for (const item of row.variable || []) {
+                if (item && item.key !== undefined) kv.set(String(item.key), String(item.value ?? ''));
+              }
+              for (const item of value.variable || []) {
+                if (item && item.key !== undefined) kv.set(String(item.key), String(item.value ?? ''));
+              }
+              let url = String(base).replace(/\$\{([^}]+)}/g, (m, k) => kv.has(k) ? kv.get(k) : m);
+              for (const [k, v] of kv) {
+                if (!v || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(k)) continue;
+                const re = new RegExp(`([?&])${k}=[^&#]*`);
+                if (re.test(url)) url = url.replace(re, `$1${k}=${v}`);
+                else url += (url.includes('?') ? '&' : '?') + `${k}=${v}`;
+              }
+              candidateUrl = url.trim();
+            }
+          }
+        } else {
+          candidateUrl = String(value?.url || value?.value || '').trim();
+        }
       }
+      if (!/^https?:\/\//i.test(candidateUrl)) continue;
+      if (isLocalPlaceholderUrl(candidateUrl)) continue;
       return candidateUrl;
     }
   }
@@ -431,8 +476,8 @@ function deriveTargetUrl(input, cases) {
   if (/^https?:\/\//i.test(explicit)) {
     return explicit;
   }
-  const envTarget = resolveEnvTargetUrl(input?.env);
-  if (envTarget) return envTarget;
+  // 无法从用例和调度参数中取到有效地址，不做环境映射兜底，返回空串。
+  // cypress.config 中 baseUrl 留空时 Cypress 不会自行 visit，避免访问到平台自身域名。
   return '';
 }
 
@@ -443,17 +488,6 @@ function isLocalPlaceholderUrl(value) {
   } catch {
     return false;
   }
-}
-
-function resolveEnvTargetUrl(env) {
-  const normalized = String(env || '').trim().toLowerCase();
-  return {
-    online: 'https://keve.corp.kuaishou.com',
-    pre: 'https://keve.corp.kuaishou.com',
-    rc: 'https://rc-eve.corp.kuaishou.com',
-    test: 'http://127.0.0.1:8080',
-    local: 'http://127.0.0.1:8080',
-  }[normalized] || '';
 }
 
 /**
@@ -600,7 +634,6 @@ function buildExecEnv({ input, taskDir, round, engine }) {
 export {
   deriveTargetUrl,
   isLocalPlaceholderUrl,
-  resolveEnvTargetUrl,
   rewriteOpenPageTargets,
 };
 
