@@ -121,8 +121,10 @@ export const test = base.extend<KeveFixture>({
     //（自定义 context 不会自动附加视频附件，需在 context 关闭后显式 attach）
     const videoOpt = (testInfo as any).project?.use?.video as any;
     const videoOn = !!videoOpt && (videoOpt === 'on' || videoOpt.mode === 'on' || videoOpt.mode === 'retain-on-failure');
+    const viewport = testInfo.project?.use?.viewport;
     const context = await browser.newContext({
       storageState,
+      ...(viewport ? { viewport } : {}),
       ...(videoOn ? { recordVideo: { dir: typeof videoOpt === 'object' && videoOpt.dir ? videoOpt.dir : undefined } } : {}),
     });
     const page = await context.newPage();

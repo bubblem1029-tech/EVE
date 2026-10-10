@@ -17,6 +17,8 @@ const resultDir = process.env.KEVE_RESULT_DIR || path.join(taskDir, 'reports', '
 const targetUrl = process.env.KEVE_TARGET_URL || '';
 
 export default {
+  viewportWidth: 2560,
+  viewportHeight: 1440,
   e2e: {
     ...(targetUrl ? { baseUrl: targetUrl } : {}),
     specPattern: 'specs/**/*.spec.ts',

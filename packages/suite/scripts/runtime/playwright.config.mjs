@@ -32,6 +32,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.KEVE_TARGET_URL || '',
     storageState: process.env.KEVE_STORAGE_STATE,
+    viewport: { width: 2560, height: 1440 },
     trace: 'off',
     screenshot: 'off',
     video: 'on',

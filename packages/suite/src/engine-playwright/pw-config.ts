@@ -77,6 +77,7 @@ export default defineConfig({
   ],
   use: {
     baseURL: ${baseURLLine},${cdp ? `\n    // CDP mode: login state preserved via connected Chrome` : `\n    storageState: path.resolve(projectRoot, '.auth/storage-state.json'),`}
+    viewport: { width: 2560, height: 1440 },
     trace: 'on-first-retry',
     screenshot: 'off',
     video: 'on',
@@ -136,6 +137,7 @@ export default defineConfig({
   ],
   use: {
     baseURL: ${baseURLLine},${cdp ? `\n    // CDP mode: login state preserved via connected Chrome` : `\n    storageState: resolve(projectRoot, '.auth', 'storage-state.json'),`}
+    viewport: { width: 2560, height: 1440 },
     trace: 'on-first-retry',
     screenshot: 'off',
     video: 'on',
