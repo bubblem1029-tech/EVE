@@ -54,6 +54,13 @@ export interface KeveGoalCallOptions {
   precondition?: string;
   step: string;
   expected: string;
+  /**
+   * 是否在 fn 之后追加一轮 Agent Re-Act 做最终判定。
+   *
+   * 默认 true（AI 场景 / 手写用例）；DSL 投影脚本传 false，判定完全由确定性
+   * 断言给出，避免为每个步骤额外消耗一轮 LLM。
+   */
+  react?: boolean;
 }
 
 type KeveFixture = {
@@ -184,6 +191,7 @@ export const test = base.extend<KeveFixture>({
       let fnErrorRaw: any; // 原始错误对象（ScreenshotDiffError 等带结构的错误需要保留结构）
       let fnResult: any; // fn 返回值透传（flow 产物，如 createDashboard 的看板名）
       let fnBlocked: boolean = false; // true when fn error is environment-blocked (skip agent Re-Act)
+      const reactEnabled = options.react !== false;
       // 截图对比：fn 前开缓冲、fn 后收集 —— engine.expectScreenshot 的结果经此进 attachment
       beginGoalShotDiffCapture();
       if (fn) {
@@ -283,6 +291,26 @@ export const test = base.extend<KeveFixture>({
             finalSnapshot: '',
             agentScreenshots: [],
             conclusion: 'fail' as const,
+          };
+        } else if (!reactEnabled) {
+          // 确定性模式（DSL 投影脚本）：断言结果即结论，不再发起 LLM 探索。
+          console.log(fnError
+            ? `[keveGoal] ⚙️ "${options.step}" deterministic mode: fn failed — skipping agent Re-Act`
+            : `[keveGoal] ⚙️ "${options.step}" deterministic mode: fn passed — skipping agent Re-Act`);
+          reactResult = {
+            expectedMet: !fnError,
+            actions: [{
+              action: {
+                tool: 'done',
+                verdict: fnError ? 'fail' : 'pass',
+                text: fnError ? `Assertion failed: ${fnError}` : '确定性断言全部通过',
+              },
+              toolOutput: '',
+              result: 'ok',
+            }],
+            finalSnapshot: '',
+            agentScreenshots: [],
+            conclusion: fnError ? 'fail' as const : 'pass' as const,
           };
         } else {
         // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──

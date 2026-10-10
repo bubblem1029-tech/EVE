@@ -199,7 +199,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
   }
 
   const emit = (body: string[]) => {
-    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
+    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
     for (const b of [...body, ...expLines]) out.push(`  ${b}`);
     out.push(`});`);
   };
@@ -323,7 +323,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       // 区域截图容错：元素不在当前页面（权限阻断等）时降级为整页截图，
       // 是否一致由基线比对决定，截图本身不做权限硬门。
       if (shotChain) {
-        out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
+        out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
         out.push(`  try {`);
         out.push(`    await engine.screenshot(${q(shotName)}, ${shotChain});`);
         out.push(`  } catch (_shotErr: any) {`);
@@ -393,13 +393,50 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
       if (urlPart) body.push(`await __gate${gi}; // 等 ${String(g.text || '就绪响应')}`);
     });
   }
-  out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
+  out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
   for (const b of body) out.push(`  ${b}`);
   out.push(`});`);
   return out;
 }
 
 // ─── 断言转译 ────────────────────────────────────────────────────────
+
+/**
+ * 步骤是否只有「纯文案期望」，必须依赖 LLM 才能判定。
+ *
+ * 平台 DSL 里有两类 expectation：
+ *  - 可执行断言（ELEMENT_NOT_EXIST / TEXT_EXIST …）→ 转译成 engine 断言，
+ *    成败在脚本里已经确定，无需再看页面；
+ *  - 纯文案载体（TEXT / 无 type）→ 不产生任何断言，只以文字描述预期，
+ *    脚本无法自证，只能交给 Agent 观察页面后判定。
+ *
+ * 只有第二类（且该步骤没有可执行断言）才需要保留 Agent Re-Act。
+ */
+function needsAgentJudge(d: DslStep): boolean {
+  const expects = d.expectation || [];
+  if (!expects.length) return false;
+  const hasExecutable = expects.some((e) => {
+    const type = String(e.type || '');
+    return type && !isTextOnlyAssert(type);
+  });
+  if (hasExecutable) return false;
+  return expects.some((e) => {
+    const type = String(e.type || '');
+    return !type || isTextOnlyAssert(type);
+  });
+}
+
+/**
+ * keveGoal 的 react 参数片段。
+ *
+ * 平台 DSL 是确定性录制产物：凡能自证的步骤都显式 react: false，跳过 Agent
+ * Re-Act —— 否则每个步骤都会额外发起一轮 LLM 探索，既拖长整体耗时至超出
+ * Cypress 用例超时（表现为「任务卡住」），也会让「报错1」这类仅作平台标签的
+ * expected 文案参与最终结论。
+ */
+function reactOption(d: DslStep): string {
+  return needsAgentJudge(d) ? '' : ', react: false';
+}
 
 /** 渲染一条 expectation；返回 null 表示「纯文案载体，不产生断言」 */
 function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {

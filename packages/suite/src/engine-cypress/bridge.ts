@@ -303,7 +303,7 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
     return { ok: true, resultsPath, reportDataPath, cases: reportData?.summary?.total ?? undefined };
   };
 
-  const handle = async (route: string, payload: any): Promise<any> => {
+  const handle = async (route: string, payload: any, signal?: AbortSignal): Promise<any> => {
     switch (route) {
       case '/echo':
         return { ok: true, echoed: payload, at: Date.now() };
@@ -356,6 +356,9 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
             method: String(payload.method || 'POST'),
             headers: reqHeaders,
             body: typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body ?? {}),
+            // 浏览器侧 goal 超时 / 主动中止后，Node 侧必须同步停止在途 LLM 请求，
+            // 否则桥会一直挂着一个上游连接，子进程无法及时收敛。
+            signal,
           });
           const body = await resp.text();
           const headers: Record<string, string> = {};
@@ -461,6 +464,16 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
     const chunks: Buffer[] = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {
+      const controller = new AbortController();
+      const llmTimeoutMs = Number(process.env.KEVE_LLM_REQUEST_TIMEOUT_MS) > 0
+        ? Number(process.env.KEVE_LLM_REQUEST_TIMEOUT_MS)
+        : 300_000;
+      const timeout = setTimeout(() => controller.abort(), llmTimeoutMs);
+      // 浏览器侧 fetch 被 AbortSignal 中止时会断开连接，这里同步中止下游请求。
+      req.on('aborted', () => controller.abort());
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
       const route = String(req.url || '').split('?')[0];
       let payload: any = {};
       try {
@@ -469,15 +482,21 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
       } catch { payload = {}; }
       let out: any;
       try {
-        out = await handle(route, payload);
+        out = await handle(route, payload, controller.signal);
       } catch (err: any) {
         out = { ok: false, error: err?.message || String(err) };
+      } finally {
+        clearTimeout(timeout);
       }
-      res.writeHead(200, {
-        'content-type': 'application/json',
-        ...corsHeaders,
-      });
-      res.end(JSON.stringify(out));
+      // 客户端在等待期间主动断开（goal 超时 / 用例中止）时响应流可能已销毁，
+      // 此时再写回会抛 ERR_STREAM_WRITE_AFTER_END，把一个正常的中止变成噪声错误。
+      if (!res.writableEnded && !res.destroyed) {
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          ...corsHeaders,
+        });
+        res.end(JSON.stringify(out));
+      }
     });
   });
 

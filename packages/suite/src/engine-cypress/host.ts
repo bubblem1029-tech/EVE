@@ -98,7 +98,7 @@ function readBrowserEnv(name: string): string {
  *   - 读初始截图  → `/fs/read-binary`
  *   - LLM 调用    → `/llm/chat`（apiKey 不出 Node）
  */
-function createCyAgentHost(bridge: ReturnType<typeof createBridge>): {
+function createCyAgentHost(bridge: ReturnType<typeof createBridge>, signal: AbortSignal): {
   targetUrl: string;
   getEnv: (name: string) => string;
   saveScreenshot: (pngBase64: string, stepIndex: number, stepName: string) => Promise<string | undefined>;
@@ -131,7 +131,7 @@ function createCyAgentHost(bridge: ReturnType<typeof createBridge>): {
     const resp = await bridge.post('/shot/save', {
       name: `agent-step${stepIndex}-${safeName}`,
       pngBase64,
-    });
+    }, { signal });
     return resp?.ok ? String(resp.path || '') || undefined : undefined;
   };
 
@@ -146,7 +146,7 @@ function createCyAgentHost(bridge: ReturnType<typeof createBridge>): {
     ] as const) {
       if (!rel) continue;
       try {
-        const resp = await bridge.post('/fs/read-binary', { file: rel });
+        const resp = await bridge.post('/fs/read-binary', { file: rel }, { signal });
         if (!resp?.ok || !resp.base64) continue;
         items.push({ type: 'text', text: `Screenshot (${label}):` });
         items.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${resp.base64}` } });
@@ -171,7 +171,7 @@ function createCyAgentHost(bridge: ReturnType<typeof createBridge>): {
       method: String(init?.method || 'POST'),
       headers,
       body: typeof init?.body === 'string' ? init.body : JSON.stringify(init?.body ?? {}),
-    });
+    }, { signal });
     if (!resp?.ok) throw new Error(resp?.error || 'llm/chat 桥调用失败');
     return new Response(String(resp.body ?? ''), {
       status: Number(resp.status) || 200,
@@ -201,12 +201,12 @@ function createCyAgentHost(bridge: ReturnType<typeof createBridge>): {
  */
 function installGoalExplorer(engine: CypressEngine, bridge: ReturnType<typeof createBridge>): void {
   const cdp = engine.rawPage() as ReturnType<typeof createCdp>;
-  const host = createCyAgentHost(bridge);
 
   setCyGoalExplorer(async (options, ctx): Promise<CyGoalExploreResult | undefined> => {
     const page = new CyAgentPage(cdp);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), CY_GOAL_TIMEOUT_MS);
+    const host = createCyAgentHost(bridge, controller.signal);
     try {
       const result = await reactLoop(page, options.step, options.expected, {
         specFilePath: ctx.specFilePath,

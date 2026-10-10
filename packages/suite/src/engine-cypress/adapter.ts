@@ -23,7 +23,7 @@ import {
 
 /** 浏览器 → Node 的调用封装（端口来自 config.env.KEVE_BRIDGE_PORT） */
 export interface Bridge {
-  post(route: string, payload?: Record<string, unknown>): Promise<any>;
+  post(route: string, payload?: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<any>;
 }
 
 export function createBridge(): Bridge {
@@ -31,11 +31,14 @@ export function createBridge(): Bridge {
   if (!port) throw new Error('[cypress-engine] KEVE_BRIDGE_PORT 未注入：请确认 cypress.config 使用了 @kkeve/suite/engine-cypress 的 setupKeveBridge');
   const base = `http://127.0.0.1:${port}`;
   return {
-    async post(route, payload = {}) {
+    async post(route, payload = {}, opts = {}) {
       const res = await fetch(base + route, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
+        // 透传中止信号：goal 超时后必须能中断本次桥调用，否则浏览器侧会一直
+        // 等一个已经在 Agent 层判定为超时的响应。
+        signal: opts.signal,
       });
       return await res.json();
     },
