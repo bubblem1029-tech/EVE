@@ -296,7 +296,12 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       break;
     case 'DRAGGING': {
       // 拖拽：context 为源，value/child 携带目标链；缺失目标不得伪装成悬停成功
-      const valueCtx = (typeof d.value === 'object' && d.value !== null ? (d.value as any).context : undefined);
+      const rawValue = d.value as any;
+      const valueCtx = Array.isArray(rawValue)
+        ? rawValue
+        : (rawValue && typeof rawValue === 'object'
+          ? rawValue.context || rawValue.value
+          : undefined);
       const targetCtx = valueCtx || d.child?.context || d.child;
       if (Array.isArray(targetCtx) && targetCtx.length) {
         emit([`await engine.drag(${chain}, ${chainExpr(targetCtx)});`, ...waitExprs(d)]);

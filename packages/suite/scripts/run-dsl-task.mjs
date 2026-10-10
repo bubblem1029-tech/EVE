@@ -7,11 +7,21 @@
  *     并把已展开、已解析的 dslList 写进 execution-input.json；
  *   - 本 runner 只做「投影 → 落盘 → 执行 → 出报告」，不直连业务库。
  *
+ * 分层约定（详见 autotest-core同步新执行链路技术方案.md 2.7 节）：
+ *   - bin 解析 / env 契约 / DSL→spec 投影这三件「纯函数」逻辑统一在
+ *     @kkeve/suite/runner 导出，本文件只负责「调函数 + 决定怎么跑」。
+ *   - 本地调试工具（autotest-core）的交互模式（mode=open）调用同一套
+ *     @kkeve/suite/runner 函数，不再自行重写一份，避免 run / open 行为漂移。
+ *
  * 两个引擎共用同一份 @kkeve/suite 装饰器脚本与同一份 report-data.json 生成逻辑，
  * 因此 Cypress / Playwright 的报告结构完全一致。
  *
  * 用法：
- *   node run-dsl-task.mjs --input execution-input.json
+ *   node run-dsl-task.mjs --input execution-input.json [--mode=run|open]
+ *
+ * mode=run（默认）：无头批跑，产出 execution-result.json / manifest.json / report-data.json。
+ * mode=open：交互调试。只做「投影 → 落盘 → 拉起 cypress.open() / playwright --ui」，
+ *   不等待测试结果；进程生命周期（杀旧进程、串行队列等）由调用方（本地调试工具）管理。
  *
  * 输出：
  *   <taskRoot>/runs/execution-result.json（执行摘要，供 backend 回写任务终态）
@@ -30,7 +40,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  resolveEngineBin,
+  buildExecEnv as buildExecEnvFromSuite,
+  projectCasesToSpecs,
+  buildCasesYaml,
+} from '../dist/runner/index.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const suiteRoot = path.resolve(__dirname, '..');
@@ -42,33 +58,6 @@ const runtimeDir = path.join(__dirname, 'runtime');
  * 保证 runner 既能被 backend spawn，也能在 suite 本地调试。
  */
 const defaultBackendRoot = path.resolve(suiteRoot, '..', '..', '..', 'eve-backend');
-
-function resolveCypressBin(backendRoot) {
-  const candidates = [
-    process.env.KEVE_CYPRESS_BIN,
-    path.join(backendRoot, 'node_modules', '.bin', 'cypress'),
-    path.join(suiteRoot, 'node_modules', '.bin', 'cypress'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
-}
-
-function resolveEsbuildModule(backendRoot) {
-  const candidates = [
-    process.env.KEVE_ESBUILD_MODULE,
-    path.join(backendRoot, 'node_modules', 'esbuild', 'lib', 'main.js'),
-    path.join(suiteRoot, 'node_modules', 'esbuild', 'lib', 'main.js'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
-}
-
-function resolvePlaywrightBin(backendRoot) {
-  const candidates = [
-    process.env.KEVE_PLAYWRIGHT_BIN,
-    path.join(backendRoot, 'node_modules', '.bin', 'playwright'),
-    path.join(suiteRoot, 'node_modules', '.bin', 'playwright'),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
-}
 
 function parseArgs(argv) {
   const args = {};
@@ -130,58 +119,10 @@ function normalizeStep(step) {
   };
 }
 
-/**
- * 投影 DSL 步骤为报告 outline，语义与 toDecorator 的 keveGoal 参数保持一致。
- * OPEN_PAGE 后紧跟的 WAIT_RESPONSE 会合并进同一个导航步骤，避免报告步骤数
- * 与脚本实际 keveGoal 数不一致。
- *
- * expected 文案统一走 stepExpectedText（与脚本投影同一个函数）：报告里展示的
- * 预期与评测 Agent 读到的预期必须逐字一致，否则平台标签（「报错4」）会在报告
- * 与评测两侧产生不同解读。
- */
-function buildCaseSteps(dslList, ctx, stepExpectedText) {
-  const steps = [];
-  for (let i = 0; i < dslList.length; i++) {
-    const d = dslList[i];
-    const op = String(d?.operation || '');
-    if (op === 'OPEN_PAGE') {
-      let j = i + 1;
-      const gates = [];
-      while (j < dslList.length && String(dslList[j]?.operation || '') === 'WAIT_RESPONSE') {
-        gates.push(dslList[j++]);
-      }
-      if (gates.length) {
-        const gateTexts = gates.map((g) => String(g?.text || '')).filter(Boolean);
-        const gateExpects = gates
-          .filter((g) => (g?.expectation || []).length > 0)
-          .map((g) => stepExpectedText(g, ctx))
-          .filter(Boolean);
-        steps.push({
-          step: String(d?.text || 'OPEN_PAGE'),
-          expected: [...gateTexts, ...gateExpects].filter(Boolean).join('；') || '打开目标页面并等待就绪响应',
-        });
-        i = j - 1;
-        continue;
-      }
-    }
-    const stepText = String(d?.text || op || '');
-    const expected = stepExpectedText(d, ctx);
-    if (!stepText) continue;
-    steps.push({ step: stepText, expected });
-  }
-  return steps;
-}
-
-/** 从账号信息里提取 toDecorator 需要的占位账号（不下发密码到脚本正文以外的位置） */
-function resolveAccount(accountInfo) {
-  const account = accountInfo?.accountInfo || accountInfo;
-  if (!account?.name) return undefined;
-  return { name: String(account.name), password: String(account.password || '') };
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.input) fail('缺少 --input <execution-input.json>');
+  const mode = args.mode === 'open' ? 'open' : 'run';
 
   const inputFile = path.resolve(args.input);
   const input = readJson(inputFile, '执行输入');
@@ -221,51 +162,22 @@ async function main() {
   fs.rmSync(resultFile, { force: true });
   fs.rmSync(manifestFile, { force: true });
 
-  const { toDecorator, stepExpectedText } = await import(
-    url.pathToFileURL(path.join(suiteRoot, 'dist/dsl/index.js')).href
-  );
-
-  // ── 逐条用例投影成装饰器脚本 ──
-  const caseEntries = [];
-  for (const item of cases) {
-    const stepGroupId = Number(item.stepGroupId);
-    if (!Number.isFinite(stepGroupId)) fail(`用例缺少合法 stepGroupId: ${JSON.stringify(item.stepGroupId)}`);
-    const rawList = Array.isArray(item.dslList) ? item.dslList : [];
-    if (!rawList.length) fail(`用例 ${stepGroupId} 的 dslList 为空，拒绝生成空脚本`);
-
-    const dslList = rawList.map(normalizeStep);
-    const importFrom = engine === 'cypress'
-      ? '@kkeve/suite/engine-cypress'
-      : '@kkeve/suite/keve-test';
-    const account = resolveAccount(item.accountInfo || input.accountInfo);
-    const renderCtx = {
-      env: input.env || 'test',
-      variableList: Array.isArray(item.variableList) ? item.variableList : [],
-      account,
-    };
-    const code = toDecorator({
-      stepGroupId,
-      caseName: item.caseName || `用例 ${stepGroupId}`,
-      dslList,
-      env: renderCtx.env,
-      variableList: renderCtx.variableList,
-      account: renderCtx.account,
-      ssoInject: input.ssoInject !== false,
-      importFrom,
-    });
-
-    const fileName = `sg${stepGroupId}.spec.ts`;
-    fs.writeFileSync(path.join(specDir, fileName), code, 'utf-8');
-    const dslSteps = buildCaseSteps(dslList, renderCtx, stepExpectedText);
-    caseEntries.push({
-      caseId: `S${stepGroupId}`,
-      stepGroupId,
-      caseName: item.caseName || `用例 ${stepGroupId}`,
-      specFile: fileName,
-      stepCount: dslList.length,
-      steps: dslSteps,
-    });
-    console.log(`[run-dsl-task] 生成脚本 ${fileName}（${dslList.length} 步）`);
+  // ── 逐条用例投影成装饰器脚本（run / open 两种模式共用同一份实现） ──
+  const normalizedCases = cases.map((item) => ({
+    ...item,
+    stepGroupId: Number(item.stepGroupId),
+    dslList: (Array.isArray(item.dslList) ? item.dslList : []).map(normalizeStep),
+  }));
+  const caseEntries = projectCasesToSpecs({
+    cases: normalizedCases,
+    engine,
+    specDir,
+    env: input.env || 'test',
+    ssoInject: input.ssoInject !== false,
+    defaultAccountInfo: input.accountInfo,
+  });
+  for (const entry of caseEntries) {
+    console.log(`[run-dsl-task] 生成脚本 ${entry.specFile}（${entry.stepCount} 步）`);
   }
 
   // ── 用例定义写入 cases/test-cases.yaml，让报告能补全步骤文案 ──
@@ -276,6 +188,14 @@ async function main() {
     buildCasesYaml(caseEntries),
     'utf-8',
   );
+
+  if (mode === 'open') {
+    // 交互调试：只负责「投影 + 拉起交互入口」，不等待退出、不写执行结果。
+    // 进程生命周期（杀旧进程、串行排队、端口探测）留给调用方（本地调试工具）管理，
+    // 这是宿主（Electron/CLI）的关注点，不属于本 runner 的职责。
+    await openInteractive({ engine, input, taskRoot, specDir, resultDir, round });
+    return;
+  }
 
   // ── 执行 ──
   const runner = engine === 'cypress' ? runCypress : runPlaywright;
@@ -333,6 +253,50 @@ async function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
+/**
+ * mode=open：拉起交互入口（cypress.open() / playwright test --ui）。
+ * env 契约与 run 模式完全一致（见 buildExecEnv），因此同一份 cypress.config.mjs /
+ * playwright.config.mjs 在两种模式下行为一致。本函数只负责「拉起」，不管进程生命周期：
+ * cypress.open() 阻塞到窗口关闭；playwright --ui 常驻进程交由调用方 detach + 管理。
+ */
+async function openInteractive({ engine, input, taskRoot, specDir, resultDir, round }) {
+  fs.mkdirSync(resultDir, { recursive: true });
+  const execEnv = buildExecEnvFromSuite({
+    input, taskDir: taskRoot, round, engine, defaultBackendRoot, suiteRoot,
+  });
+
+  if (engine === 'playwright') {
+    const configPath = path.join(runtimeDir, 'playwright.config.mjs');
+    const backendRoot = input.backendRoot || defaultBackendRoot;
+    const cli = resolveEngineBin({ engine: 'playwright', backendRoot, suiteRoot });
+    if (!cli || !fs.existsSync(cli)) fail('找不到 Playwright 可执行文件，请设置 KEVE_PLAYWRIGHT_BIN');
+    const child = spawn(cli, ['test', '--ui', '--config', configPath], {
+      cwd: taskRoot,
+      env: execEnv,
+      detached: true,
+      stdio: 'inherit',
+    });
+    child.unref();
+    console.log(`[run-dsl-task] Playwright UI 已拉起（pid=${child.pid}）`);
+    return;
+  }
+
+  const configPath = path.join(runtimeDir, 'cypress.config.mjs');
+  const backendRoot = input.backendRoot || defaultBackendRoot;
+  const cypressBin = resolveEngineBin({ engine: 'cypress', backendRoot, suiteRoot });
+  if (!cypressBin || !fs.existsSync(cypressBin)) fail('找不到 Cypress 可执行文件，请设置 KEVE_CYPRESS_BIN');
+  // cypress open 阻塞到窗口关闭才返回，和线上无头跑一致地走同一个 CLI 可执行文件。
+  spawnSync(cypressBin, [
+    'open',
+    '--project', taskRoot,
+    '--config-file', configPath,
+  ], {
+    cwd: taskRoot,
+    stdio: 'inherit',
+    env: { ...execEnv, ELECTRON_RUN_AS_NODE: '' },
+  });
+}
+
 /** reports/latest 软链指向最新轮次，便于 backend 按任务读取最近一次报告 */
 function updateLatestLink(reportsDir, resultDir) {
   const latestDir = path.join(reportsDir, 'latest');
@@ -387,25 +351,6 @@ function writeManifest({ manifestFile, taskRoot, taskId, engine, casePath, round
   fs.mkdirSync(path.dirname(manifestFile), { recursive: true });
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
   return manifest;
-}
-
-/** 供报告补全步骤文案的最小用例清单 */
-function buildCasesYaml(caseEntries) {
-  const lines = ['modules:', '  - name: plan', '    cases:'];
-  for (const entry of caseEntries) {
-    lines.push(`      - id: ${entry.caseId}`);
-    lines.push(`        title: ${JSON.stringify(entry.caseName)}`);
-    if (Array.isArray(entry.steps) && entry.steps.length) {
-      lines.push('        steps:');
-      for (const step of entry.steps) {
-        lines.push(`          - step: ${JSON.stringify(step.step || '')}`);
-        lines.push(`            expected: ${JSON.stringify(step.expected || '')}`);
-      }
-    } else {
-      lines.push('        steps: []');
-    }
-  }
-  return lines.join('\n') + '\n';
 }
 
 function readReportData(resultDir) {
@@ -578,12 +523,12 @@ function summarizeReport(reportData) {
 function runPlaywright({ input, taskDir, specDir, resultDir, round }) {
   const configPath = path.join(runtimeDir, 'playwright.config.mjs');
   const backendRoot = input.backendRoot || defaultBackendRoot;
-  const cli = resolvePlaywrightBin(backendRoot);
+  const cli = resolveEngineBin({ engine: 'playwright', backendRoot, suiteRoot });
   if (!cli || !fs.existsSync(cli)) fail('找不到 Playwright 可执行文件，请设置 KEVE_PLAYWRIGHT_BIN');
   const result = spawnSync(cli, ['test', '--config', configPath], {
     cwd: taskDir,
     stdio: 'inherit',
-    env: buildExecEnv({ input, taskDir, round, engine: 'playwright' }),
+    env: buildExecEnvFromSuite({ input, taskDir, round, engine: 'playwright', defaultBackendRoot, suiteRoot }),
   });
   if (result.error) fail(`Playwright 启动失败: ${result.error.message}`);
   return result.status ?? 1;
@@ -596,7 +541,7 @@ function useCypressConfig({ taskDir, specDir, resultDir }) {
 function runCypress({ input, taskDir, specDir, resultDir, round }) {
   const configPath = useCypressConfig({ taskDir, specDir, resultDir });
   const backendRoot = input.backendRoot || defaultBackendRoot;
-  const cypressBin = resolveCypressBin(backendRoot);
+  const cypressBin = resolveEngineBin({ engine: 'cypress', backendRoot, suiteRoot });
   if (!cypressBin || !fs.existsSync(cypressBin)) {
     fail('找不到 Cypress 可执行文件，请设置 KEVE_CYPRESS_BIN');
   }
@@ -609,38 +554,13 @@ function runCypress({ input, taskDir, specDir, resultDir, round }) {
     cwd: taskDir,
     stdio: 'inherit',
     env: {
-      ...buildExecEnv({ input, taskDir, round, engine: 'cypress' }),
+      ...buildExecEnvFromSuite({ input, taskDir, round, engine: 'cypress', defaultBackendRoot, suiteRoot }),
       // Cypress 内部会 fork Electron；清空该变量避免以纯 Node 模式启动
       ELECTRON_RUN_AS_NODE: '',
     },
   });
   if (result.error) fail(`Cypress 启动失败: ${result.error.message}`);
   return result.status ?? 1;
-}
-
-/** 两个引擎共用同一套环境变量契约 */
-function buildExecEnv({ input, taskDir, round, engine }) {
-  const backendRoot = input.backendRoot || defaultBackendRoot;
-  return {
-    ...process.env,
-    KEVE_TASK_DIR: taskDir,
-    KEVE_RESULT_DIR: path.join(taskDir, 'reports', `round-${round}`),
-    KEVE_CASES_DIR: path.join(taskDir, 'cases'),
-    // 媒体相对路径以任务根为基准，保证 report-data.json 里不出现 `..`
-    KEVE_ARTIFACT_BASE: taskDir,
-    KEVE_ROUND: round,
-    KEVE_ENV: input.env || 'test',
-    KEVE_TARGET_URL: input.targetUrl || '',
-    KEVE_STORAGE_STATE: path.join(taskDir, '.auth', 'storage-state.json'),
-    KEVE_SSO_COOKIES: input.ssoCookiesJson || '[]',
-    KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {}),
-    KEVE_LLM_BASE_URL: input.llm?.baseUrl || process.env.KEVE_LLM_BASE_URL || '',
-    KEVE_LLM_MODEL_NAME: input.llm?.model || process.env.KEVE_LLM_MODEL_NAME || '',
-    KEVE_LLM_API_KEY: input.llm?.apiKey || process.env.KEVE_LLM_API_KEY || '',
-    KEVE_ENGINE: engine,
-    // Cypress 预处理器位于 suite 静态配置目录，esbuild 需由 backend 提供
-    KEVE_ESBUILD_MODULE: resolveEsbuildModule(backendRoot),
-  };
 }
 
 export {
