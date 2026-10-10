@@ -48,6 +48,77 @@ interface BridgeState {
   results: CypressTestResultRecord[];
 }
 
+/** Cypress 最终状态 → 报告状态；pending 明确是跳过，其余非 passed 均按失败处理 */
+function mapCypressState(rawState: any): CypressTestResultRecord['status'] {
+  const state = String(rawState || '').toLowerCase();
+  if (state === 'passed') return 'passed';
+  if (state === 'pending' || state === 'skipped') return 'skipped';
+  if (state === 'timedout' || state === 'timed_out') return 'timedOut';
+  return 'failed';
+}
+
+/** 从 Cypress after:spec / after:run 的 TestResult 提取开始时间与耗时 */
+function timingOfCypressTest(test: any): { duration: number; startTime: string } {
+  const attempts = Array.isArray(test?.attempts) ? test.attempts : [];
+  const last = attempts[attempts.length - 1] || {};
+  const duration = Number(last.wallClockDuration ?? test?.duration ?? 0);
+  const startedAt = last.wallClockStartedAt || test?.wallClockStartedAt;
+  if (startedAt) {
+    const parsed = new Date(startedAt);
+    if (!Number.isNaN(parsed.getTime())) return { duration, startTime: parsed.toISOString() };
+  }
+  return { duration, startTime: new Date(Date.now() - (Number.isFinite(duration) ? duration : 0)).toISOString() };
+}
+
+/**
+ * 用 Cypress 引擎掌握的最终测试结果补录 / 校正状态。
+ *
+ * 浏览器侧 `/report/test` 依赖全局 afterEach 与场景状态；beforeEach 等钩子
+ * 直接失败时状态可能拿不到，导致用例没有任何上报，最终被 reportData 补成
+ * `missing`。Cypress 的 after:spec / after:run 仍能提供权威结果，这里是唯一
+ * 不依赖用例内钩子的兜底入口。
+ */
+function mergeCypressRunTests(state: BridgeState, tests: any[], specFile = ''): number {
+  let merged = 0;
+  for (const test of Array.isArray(tests) ? tests : []) {
+    const titlePath = Array.isArray(test?.title) ? test.title.map((part: any) => String(part)) : [];
+    const title = (titlePath[titlePath.length - 1] || String(test?.title || '')).trim();
+    if (!title) continue;
+    const suiteTitle = titlePath.length >= 2 ? String(titlePath[titlePath.length - 2] || '').trim() : '';
+    const status = mapCypressState(test?.state);
+    const { duration, startTime } = timingOfCypressTest(test);
+    const error = status === 'passed' || status === 'skipped'
+      ? undefined
+      : String(test?.displayError || test?.attempts?.[test.attempts.length - 1]?.error?.message || '');
+    const existing = state.results.find((r) => r.title === title && (!specFile || !r.file || r.file === specFile));
+    if (existing) {
+      // Cypress 的最终状态优先于浏览器侧可能拿到的中间状态；日志与附件保留。
+      existing.status = status;
+      existing.duration = duration || existing.duration;
+      existing.startTime = startTime || existing.startTime;
+      // Cypress 最终结论权威：失败才写错误，最终 passed/skipped 必须清掉
+      // 浏览器侧中间状态可能留下的误报错误，避免报告出现「通过但带错误」。
+      existing.error = error;
+      if (!existing.suiteTitle && suiteTitle) existing.suiteTitle = suiteTitle;
+      if (!existing.file && specFile) existing.file = specFile;
+    } else {
+      state.results.push({
+        title,
+        suiteTitle,
+        file: specFile,
+        status,
+        duration,
+        startTime,
+        error,
+        logs: [],
+        attachments: [],
+      });
+    }
+    merged++;
+  }
+  return merged;
+}
+
 function resultDirOf(): string {
   // 优先使用 runner 注入的报告目录；缺失时回退旧布局，兼容历史执行环境。
   if (process.env.KEVE_RESULT_DIR) return path.resolve(process.env.KEVE_RESULT_DIR);
@@ -300,7 +371,10 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
         fs.symlinkSync(path.basename(state.resultDir), latestDir, 'junction');
       } catch { /* 软链失败不影响报告生成 */ }
     }
-    return { ok: true, resultsPath, reportDataPath, cases: reportData?.summary?.total ?? undefined };
+    // reportData.summary 是 summaryJson 本体，total 在其嵌套的 summary 字段下。
+    // 直接读 summary.total 恒为 undefined，日志会误报「用例 0」，掩盖真实用例数。
+    const cases = reportData?.summary?.summary?.total ?? reportData?.summary?.total;
+    return { ok: true, resultsPath, reportDataPath, cases: cases ?? undefined };
   };
 
   const handle = async (route: string, payload: any, signal?: AbortSignal): Promise<any> => {
@@ -552,8 +626,14 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
 
   // 报告收口放在 after:run：此时所有 spec 的 /report/test 都已落盘，
   // 且不依赖任何场景级的 afterAll（硬失败/中断也能出报告）。
-  on('after:run', async () => {
+  on('after:run', async (runResults: any) => {
     try {
+      // 最后一次用 Cypress run 全量结果校正，防止个别 spec 的 after:spec 未触发。
+      let merged = 0;
+      for (const run of Array.isArray(runResults?.runs) ? runResults.runs : []) {
+        merged += mergeCypressRunTests(state, run?.tests || [], String(run?.spec?.relative || ''));
+      }
+      if (merged > 0) console.log(`[keve-bridge] Cypress 最终结果校正 ${merged} 条`);
       const out = await finalize();
       console.log(`[keve-bridge] report-data.json → ${out.reportDataPath}（用例 ${out.cases ?? 0}）`);
     } catch (err: any) {
@@ -570,6 +650,8 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
    * after:spec 早于 after:run 触发，此时 results 已由浏览器侧 /report/test 落盘。
    */
   on('after:spec', async (_spec: any, results: any) => {
+    const merged = mergeCypressRunTests(state, results?.tests || [], String(results?.spec?.relative || ''));
+    if (merged > 0) console.log(`[keve-bridge] Cypress 用例结果校正 ${merged} 条`);
     const video = results?.video;
     if (video && fs.existsSync(video)) {
       // 相对 taskDir，与 Playwright 侧 videoPath 的语义一致

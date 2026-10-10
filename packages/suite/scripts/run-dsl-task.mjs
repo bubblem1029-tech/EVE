@@ -550,15 +550,17 @@ function rewriteOpenPageTargets(input, cases) {
 
 /**
  * 逐条统计 caseResults 状态。
- * 状态语义与 core/generateReport 保持一致：
- *   passed / failed 之外的一律按 skipped 计入，保证 total = passed + failed + skipped。
+ *
+ * 只有显式 `skipped` 才算跳过；`missing` / `timedOut` / `unknown` / `error`
+ * 都代表用例没有得到有效执行结果或执行异常，必须计为失败。历史实现把它们
+ * 统一算成 skipped，导致 Cypress 已报 `1 failed` 时平台仍展示 0 失败。
  */
 function summarizeReport(reportData) {
   const cases = Array.isArray(reportData?.caseResults) ? reportData.caseResults : [];
   if (cases.length) {
     const passed = cases.filter((item) => item?.status === 'passed').length;
-    const failed = cases.filter((item) => item?.status === 'failed').length;
-    const skipped = cases.length - passed - failed;
+    const skipped = cases.filter((item) => item?.status === 'skipped').length;
+    const failed = cases.length - passed - skipped;
     return { passed, failed, skipped, total: cases.length };
   }
   const summary = reportData?.summary?.summary || reportData?.summary || {};
