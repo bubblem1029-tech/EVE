@@ -189,8 +189,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
 
   const out: string[] = [];
   const stepText = String(d.text || op);
-  const expTexts = (d.expectation || []).map((e) => String(e.text || '')).filter(Boolean);
-  const expected = expTexts.length ? expTexts.join('；') : '操作完成，页面正常响应';
+  const expected = expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
   const chain = chainExpr(d.context);
   const expLines: string[] = [];
   for (const e of d.expectation || []) {
@@ -199,7 +198,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
   }
 
   const emit = (body: string[]) => {
-    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
+    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
     for (const b of [...body, ...expLines]) out.push(`  ${b}`);
     out.push(`});`);
   };
@@ -323,7 +322,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       // 区域截图容错：元素不在当前页面（权限阻断等）时降级为整页截图，
       // 是否一致由基线比对决定，截图本身不做权限硬门。
       if (shotChain) {
-        out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
+        out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
         out.push(`  try {`);
         out.push(`    await engine.screenshot(${q(shotName)}, ${shotChain});`);
         out.push(`  } catch (_shotErr: any) {`);
@@ -367,7 +366,8 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
   const stepText = String(d.text || 'OPEN_PAGE');
   const gateTexts = gates.map((g) => String(g.text || '')).filter(Boolean);
   const gateExpects = gates
-    .flatMap((g) => (g.expectation || []).map((e) => String(e.text || '')))
+    .filter((g) => (g.expectation || []).length > 0)
+    .map((g) => expectedTextOf(g.expectation || [], (e) => resolveExpectationValue(e, ctx)))
     .filter(Boolean);
   const expected =
     [...gateTexts, ...gateExpects].filter(Boolean).join('；') || '打开目标页面并等待就绪响应';
@@ -393,7 +393,7 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
       if (urlPart) body.push(`await __gate${gi}; // 等 ${String(g.text || '就绪响应')}`);
     });
   }
-  out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${reactOption(d)} }, async () => {`);
+  out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
   for (const b of body) out.push(`  ${b}`);
   out.push(`});`);
   return out;
@@ -401,44 +401,144 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
 
 // ─── 断言转译 ────────────────────────────────────────────────────────
 
-/**
- * 步骤是否只有「纯文案期望」，必须依赖 LLM 才能判定。
- *
- * 平台 DSL 里有两类 expectation：
- *  - 可执行断言（ELEMENT_NOT_EXIST / TEXT_EXIST …）→ 转译成 engine 断言，
- *    成败在脚本里已经确定，无需再看页面；
- *  - 纯文案载体（TEXT / 无 type）→ 不产生任何断言，只以文字描述预期，
- *    脚本无法自证，只能交给 Agent 观察页面后判定。
- *
- * 只有第二类（且该步骤没有可执行断言）才需要保留 Agent Re-Act。
- */
-function needsAgentJudge(d: DslStep): boolean {
-  const expects = d.expectation || [];
-  if (!expects.length) return false;
-  const hasExecutable = expects.some((e) => {
-    const type = String(e.type || '');
-    return type && !isTextOnlyAssert(type);
-  });
-  if (hasExecutable) return false;
-  return expects.some((e) => {
-    const type = String(e.type || '');
-    return !type || isTextOnlyAssert(type);
-  });
+/** 计算 expected 文案所需的最小上下文（与脚本投影共用，保证报告与脚本同文案） */
+export interface ExpectedRenderContext {
+  env: string;
+  variableList?: DslVariableRow[];
+  account?: { name: string; password: string };
 }
 
 /**
- * keveGoal 的 react 参数片段。
+ * 步骤 expected 文案的**公开**入口。
  *
- * 平台 DSL 是确定性录制产物：凡能自证的步骤都显式 react: false，跳过 Agent
- * Re-Act —— 否则每个步骤都会额外发起一轮 LLM 探索，既拖长整体耗时至超出
- * Cypress 用例超时（表现为「任务卡住」），也会让「报错1」这类仅作平台标签的
- * expected 文案参与最终结论。
+ * 投影脚本（toDecorator）与报告 outline（run-dsl-task / report-data）必须产出
+ * 同一份文案，否则会出现「报告的预期」与「评测 Agent 看到的预期」不一致 ——
+ * 那正是「报错4」这类标签被当成字面量去页面搜索的根因。调用方统一走这里。
  */
-function reactOption(d: DslStep): string {
-  return needsAgentJudge(d) ? '' : ', react: false';
+export function stepExpectedText(step: DslStep, ctx: ExpectedRenderContext): string {
+  const renderCtx: RenderCtx = {
+    env: ctx.env,
+    variableList: ctx.variableList || [],
+    account: ctx.account,
+  };
+  return expectedTextOf(step.expectation || [], (e) => resolveExpectationValue(e, renderCtx));
 }
 
-/** 渲染一条 expectation；返回 null 表示「纯文案载体，不产生断言」 */
+/**
+ * 步骤的 expected 文案 —— 喂给评测 Agent 判断「预期是否真的达成」。
+ *
+ * 平台 expectation[].text 常常只是录制期标签（「报错1」「报错4」），不携带
+ * 任何可判定语义；真实预期藏在同一条 expectation 的 type + value + context 里
+ * （如 ELEMENT_NOT_EXIST + includes「业务逻辑错误」= 页面不应出现该错误）。
+ * 只把标签交给评测 Agent，它会去页面上找字面量「报错4」并据此误判失败。
+ *
+ * 因此按「可执行断言语义优先、标签作为备注」组装：
+ *   - 有可执行断言 → 渲染成人话（页面不存在包含「业务逻辑错误」的内容）；
+ *   - 纯文案载体（TEXT / 无 type）→ 标签本身就是人话，直接采用；
+ *   - 一个断言都渲染不出来时，退回平台标签，最后兜底为通用文案。
+ */
+function expectedTextOf(
+  expectations: DslExpectation[],
+  resolveValue: (e: DslExpectation) => string,
+): string {
+  const semantic: string[] = [];
+  const labelOnly: string[] = [];
+
+  for (const e of expectations) {
+    const label = String(e.text || '').trim();
+    const type = String(e.type || '');
+    if (!type || isTextOnlyAssert(type)) {
+      if (label) labelOnly.push(label);
+      continue;
+    }
+    const phrase = describeExpectation(e, resolveValue(e));
+    // 未知断言在 renderExpectation 里会确定性报错；这里不能让 expected 抢先崩，
+    // 退化成标签即可，真正的失败由断言渲染抛出。
+    if (phrase) semantic.push(label && !phrase.includes(label) ? `${phrase}（${label}）` : phrase);
+    else if (label) labelOnly.push(label);
+  }
+
+  const parts = [...semantic, ...labelOnly].filter(Boolean);
+  return parts.length ? parts.join('；') : '操作完成，页面正常响应';
+}
+
+/** 单条可执行断言 → 人类可读预期；返回 null 表示无法给出语义（由调用方兜底） */
+function describeExpectation(e: DslExpectation, val: string): string | null {
+  const type = String(e.type || '');
+  const target = describeChain(e.context);
+  const value = String(val ?? '');
+
+  switch (type) {
+    case 'ELEMENT_EXIST':
+      return `页面存在${target}`;
+    case 'ELEMENT_NOT_EXIST':
+      return `页面不存在${target}`;
+    case 'ELEMENT_VISIBLE':
+      return `${target}可见`;
+    case 'ELEMENT_NOT_VISIBLE':
+      return `${target}不可见`;
+    case 'TEXT_EXIST':
+      if (isPageTitleAssertion(e)) return `页面标题包含「${value}」`;
+      return `页面存在包含「${value}」的内容${target}`;
+    case 'TEXT_NOT_EXIST':
+      if (!value.trim()) return null;
+      return `页面不存在包含「${value}」的内容${target}`;
+    case 'TEXT_EQUAL':
+      return `元素${target}文本等于「${value}」`;
+    case 'EXPECTED_VALUE': {
+      const ctype = String(e.ctype || 'text').toLowerCase();
+      const { mode, negated } = parseComparison(String(e.cexpression || 'include'));
+      const dim = { text: '文本', class: '类名', placeholder: '占位提示', style: '样式', index: '元素个数' }[ctype] || ctype;
+      if (ctype === 'index') return `元素${target}个数等于 ${value}`;
+      const op = mode === 'eq' ? (negated ? '不等于' : '等于') : (negated ? '不包含' : '包含');
+      return `元素${target}的${dim}${op}「${value}」`;
+    }
+    case 'EXPECTED__PAGET_VALUE': {
+      const ctype = String(e.ctype || 'url').toLowerCase();
+      const { mode, negated } = parseComparison(String(e.cexpression || 'eq'));
+      const dim = ctype === 'title' ? '标题' : '地址';
+      const op = mode === 'eq' ? (negated ? '不等于' : '等于') : (negated ? '不包含' : '包含');
+      return `页面${dim}${op}「${value}」`;
+    }
+    case 'SCREEN_SHOT_COMPARE':
+    case 'SCREENSHOT_COMPARE':
+    case 'IMAGE_COMPARE':
+      return `页面截图与基线「${value || e.text || ''}」一致`;
+    default:
+      return null;
+  }
+}
+
+/** 定位链 → 人类可读描述（评测 Agent 据此知道「在哪个区域」观察） */
+function describeChain(context: DslHop[] | undefined): string {
+  let hops: CollectedHop[];
+  try {
+    hops = collectHops(context);
+  } catch {
+    return '';
+  }
+  if (!hops.length) return '';
+  // 单跳文本包含：平台最常见的「页面不应出现某文案」录制形态
+  if (hops.length === 1 && (hops[0].type === 'includes' || hops[0].type === 'text')) {
+    return `包含「${hops[0].value.trim()}」的元素`;
+  }
+  const parts = hops.map((h) => {
+    const text = h.value.trim();
+    if (h.type === 'includes' || h.type === 'text') return `包含「${text}」`;
+    if (h.type === 'selector') return `选择器「${text}」`;
+    return `${h.type}=「${text}」`;
+  });
+  return `（${parts.join(' → ')}）`;
+}
+
+/**
+ * 渲染一条 expectation 为 engine 断言；返回 null 表示「纯文案载体，不产生断言」。
+ *
+ * 注意投影脚本**不输出 `react: false`**：可执行断言只证明预期的一个子集，
+ * fn 执行成功不等于 expected 已达成，所以每个 goal 都保留评测阶段 —— Agent
+ * 先观察真实页面评测，达成即放行，未达成再继续探索；断言失败由引擎侧统一
+ * 参与终局覆盖，不允许被评审判成 pass。
+ */
 function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
   const type = String(e.type || '');
 

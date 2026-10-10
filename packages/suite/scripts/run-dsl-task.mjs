@@ -134,8 +134,12 @@ function normalizeStep(step) {
  * 投影 DSL 步骤为报告 outline，语义与 toDecorator 的 keveGoal 参数保持一致。
  * OPEN_PAGE 后紧跟的 WAIT_RESPONSE 会合并进同一个导航步骤，避免报告步骤数
  * 与脚本实际 keveGoal 数不一致。
+ *
+ * expected 文案统一走 stepExpectedText（与脚本投影同一个函数）：报告里展示的
+ * 预期与评测 Agent 读到的预期必须逐字一致，否则平台标签（「报错4」）会在报告
+ * 与评测两侧产生不同解读。
  */
-function buildCaseSteps(dslList) {
+function buildCaseSteps(dslList, ctx, stepExpectedText) {
   const steps = [];
   for (let i = 0; i < dslList.length; i++) {
     const d = dslList[i];
@@ -149,7 +153,8 @@ function buildCaseSteps(dslList) {
       if (gates.length) {
         const gateTexts = gates.map((g) => String(g?.text || '')).filter(Boolean);
         const gateExpects = gates
-          .flatMap((g) => (g?.expectation || []).map((e) => String(e?.text || '')))
+          .filter((g) => (g?.expectation || []).length > 0)
+          .map((g) => stepExpectedText(g, ctx))
           .filter(Boolean);
         steps.push({
           step: String(d?.text || 'OPEN_PAGE'),
@@ -160,8 +165,7 @@ function buildCaseSteps(dslList) {
       }
     }
     const stepText = String(d?.text || op || '');
-    const expTexts = (d?.expectation || []).map((e) => String(e?.text || '')).filter(Boolean);
-    const expected = expTexts.length ? expTexts.join('；') : '操作完成，页面正常响应';
+    const expected = stepExpectedText(d, ctx);
     if (!stepText) continue;
     steps.push({ step: stepText, expected });
   }
@@ -217,7 +221,7 @@ async function main() {
   fs.rmSync(resultFile, { force: true });
   fs.rmSync(manifestFile, { force: true });
 
-  const { toDecorator } = await import(
+  const { toDecorator, stepExpectedText } = await import(
     url.pathToFileURL(path.join(suiteRoot, 'dist/dsl/index.js')).href
   );
 
@@ -233,20 +237,26 @@ async function main() {
     const importFrom = engine === 'cypress'
       ? '@kkeve/suite/engine-cypress'
       : '@kkeve/suite/keve-test';
+    const account = resolveAccount(item.accountInfo || input.accountInfo);
+    const renderCtx = {
+      env: input.env || 'test',
+      variableList: Array.isArray(item.variableList) ? item.variableList : [],
+      account,
+    };
     const code = toDecorator({
       stepGroupId,
       caseName: item.caseName || `用例 ${stepGroupId}`,
       dslList,
-      env: input.env || 'test',
-      variableList: Array.isArray(item.variableList) ? item.variableList : [],
-      account: resolveAccount(item.accountInfo || input.accountInfo),
+      env: renderCtx.env,
+      variableList: renderCtx.variableList,
+      account: renderCtx.account,
       ssoInject: input.ssoInject !== false,
       importFrom,
     });
 
     const fileName = `sg${stepGroupId}.spec.ts`;
     fs.writeFileSync(path.join(specDir, fileName), code, 'utf-8');
-    const dslSteps = buildCaseSteps(dslList);
+    const dslSteps = buildCaseSteps(dslList, renderCtx, stepExpectedText);
     caseEntries.push({
       caseId: `S${stepGroupId}`,
       stepGroupId,

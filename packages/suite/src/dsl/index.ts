@@ -12,11 +12,13 @@
 
 export {
   toDecorator,
+  stepExpectedText,
   type DslHop,
   type DslValue,
   type DslExpectation,
   type DslStep,
   type DslVariableRow,
+  type ExpectedRenderContext,
   type ToDecoratorOptions,
 } from './toDecorator.js';
 

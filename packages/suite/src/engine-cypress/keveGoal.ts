@@ -24,16 +24,6 @@ export interface KeveGoalCallOptions {
   precondition?: string;
   step: string;
   expected: string;
-  /**
-   * 是否在 fn 之后追加一轮 Agent Re-Act 做最终判定。
-   *
-   * 默认 true（AI 场景 / 手写用例）：fn 只是前置动作与确定性校验，预期是否真正
-   * 达成由 Agent 观察真实页面后判定。
-   *
-   * DSL 投影脚本会显式传 false：整条链路的判定已由确定性断言给出，Re-Act 只会
-   * 额外消耗 LLM 预算，并让「报错1」这类平台标签参与结论。
-   */
-  react?: boolean;
 }
 
 /** agent Re-Act 的结果（P0-3 接入；未接入时由 fn 结果直接判定） */
@@ -122,7 +112,6 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     let fnErrorRaw: any;
     let fnResult: any;
     let fnBlocked = false;
-    const reactEnabled = options.react !== false;
     const fnSource = fn?.toString() || undefined;
 
     const owned = !isGoalShotDiffCaptureActive();
@@ -184,30 +173,12 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
         agentScreenshots: [],
       };
       console.log(`[keveGoal] 📊 "${options.step}" 截图差异超阈值 — 确定性失败`);
-    } else if (!reactEnabled) {
-      // 确定性模式：断言是否通过就是结论，不再发起 LLM 探索。
-      reactResult = {
-        expectedMet: !fnError,
-        conclusion: fnError ? 'fail' : 'pass',
-        actions: [{
-          action: {
-            tool: 'done',
-            verdict: fnError ? 'fail' : 'pass',
-            text: fnError ? `Assertion failed: ${fnError}` : '确定性断言全部通过',
-          },
-          toolOutput: '',
-          result: 'ok',
-        }],
-        agentScreenshots: [],
-      };
-      logLine(fnError
-        ? `[keveGoal] ⚙️ "${options.step}" 确定性模式：fn 失败，跳过 Agent Re-Act`
-        : `[keveGoal] ⚙️ "${options.step}" 确定性模式：fn 通过，跳过 Agent Re-Act`);
     } else {
-      // fn 成功 / 失败都交给探索器（若引擎入口注册了 AI Re-Act）。
-      // fn 只是前置确定性校验，@keveGoal 的预期是否真正达成必须由 Agent
-      // 观察真实页面后给出最终结论 —— 即便 fn 已通过，也要产出推理轨迹与
-      // 执行后截图，否则报告里会缺少 AI 推理日志。
+      // fn 成功 / 失败都交给评测器。fn 只是前置动作与确定性校验：
+      //  - fn 成功 ≠ expected 达成（fn 可能只覆盖预期的一个子集）；
+      //  - fn 失败 ≠ 不可恢复（普通运行时错误下页面可能仍可探索自愈）。
+      // 「先评测、再决定放行还是探索」由这一轮承担：Agent 先观察真实页面评测
+      // expected，达成即 done(pass) 放行，未达成再继续探索。
       let explored: CyGoalExploreResult | undefined;
       if (explorer) {
         try {
