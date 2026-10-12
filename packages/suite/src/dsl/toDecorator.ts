@@ -70,6 +70,8 @@ export interface DslStep {
   expectation?: DslExpectation[];
   /** 拖拽目标 / 嵌套上下文 */
   child?: any;
+  /** MOVE_ELEMENT 等算子的嵌套子动作（如 hover 行后点击「更多」） */
+  children?: Array<Record<string, any>>;
   urlPart?: string;
 }
 
@@ -104,10 +106,13 @@ export interface ToDecoratorOptions {
 /** 生成装饰器脚本源码（UTF-8 文本） */
 export function toDecorator(options: ToDecoratorOptions): string {
   const { stepGroupId, caseName, dslList, env, account } = options;
+  // 先扫一遍 WRITE_GLOBAL，收集本场景声明的运行时变量名（合法标识符才提升）
+  const runtimeVars = collectWriteGlobalVars(dslList);
   const ctx: RenderCtx = {
     env,
     variableList: options.variableList || [],
     account,
+    runtimeVars,
   };
   const lines: string[] = [];
   const L = (s: string) => lines.push(s);
@@ -126,6 +131,12 @@ export function toDecorator(options: ToDecoratorOptions): string {
   L(`export class Model_SG${stepGroupId} {`);
   L(`  @keveScene('S${stepGroupId}', ${q(`${caseName}（源 DSL 转译）`)})`);
   L(`  static async scene_SG${stepGroupId}({ engine, keveGoal }: any) {`);
+  if (runtimeVars.size) {
+    // WRITE_GLOBAL 变量提升：顶部声明、原位赋值。声明放在场景函数作用域，
+    // 保证跨步骤读写的顺序语义与「先写后读」一致，且同一变量只求值一次。
+    L(`    // WRITE_GLOBAL 提升的运行时变量（原位赋值，见对应步骤）`);
+    for (const name of [...runtimeVars].sort()) L(`    let ${name}: any;`);
+  }
 
   for (let i = 0; i < dslList.length; i++) {
     const d = dslList[i];
@@ -168,6 +179,19 @@ interface RenderCtx {
   env: string;
   variableList: DslVariableRow[];
   account?: { name: string; password: string };
+  /**
+   * 本场景内由 WRITE_GLOBAL 声明的运行时变量名（提升为场景函数局部变量）。
+   *
+   * 平台模型：`WRITE_GLOBAL` 求值一个 JS 表达式并「写全局」，后续步骤用
+   * `${name}` 引用。旧引擎与老实现都只求值不落库（见 old_back 的
+   * dslSceneGenerator），导致 `${name}` 变成字面量透传。
+   *
+   * 这里不引入引擎侧变量表，而是把变量提升为**场景函数的局部变量**：
+   * 顶部 `let X: any;` 声明，WRITE_GLOBAL 原位 `X = await engine.evaluate(expr)`。
+   * 这样同一变量在多处引用时只求值一次（表达式可能非幂等，如 `+Date.now()`），
+   * 「求值一次、多处复用」由语言层面保证。
+   */
+  runtimeVars: Set<string>;
 }
 
 function renderStep(d: DslStep, ctx: RenderCtx): string[] {
@@ -189,16 +213,67 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
 
   const out: string[] = [];
   const stepText = String(d.text || op);
-  const expected = expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
-  const chain = chainExpr(d.context);
+  const chain = chainExpr(d.context, ctx);
   const expLines: string[] = [];
   for (const e of d.expectation || []) {
     const a = renderExpectation(e, ctx);
     if (a) expLines.push(a);
   }
 
+  // ── 短路判据：expected 是否已被 fn 内的可执行事实**完全**覆盖 ──
+  // 每条 expectation 渲染成功 ⇔ 它落下了一条可执行断言，此时 expected 只是这批
+  // 断言的转述，断言全过即 expected 达成。两种形态满足该等式：
+  //   a) exps 与 expLines 都为空 —— 平台存下来的 expected 只是「操作完成，页面正常
+  //      响应」这句占位文案，不含可判定语义。让 Agent 去评测它，它既无判据可依，
+  //      又会顺着步骤文案继续往下做（实测会越界把后续步骤的动作一并执行，再撞上
+  //      步数上限，把一步已成功的动作判成失败）。
+  //   b) 全部 expectation 都是可执行断言。
+  // 只要出现 TEXT / 无 type 的「纯文案期望」、或某条断言渲染成 null，等式不成立，
+  // expected 就携带了断言覆盖不到的人话语义，必须保留评测阶段交给 Agent，不能短路。
+  const exps = d.expectation || [];
+  // 注意：必须在补自动断言之前取值 —— 补断言会让 expLines 比 exps 多一条。
+  const expectedFullyCovered = expLines.length === exps.length;
+
+  // 页面级步骤例外：navigate / refresh 不抛错只证明「导航动作已下发」，不证明
+  // 「目标页面真的渲染出来了」—— 403、登录跳转、空白页同样是成功返回。
+  // 「页面正常响应」是一份 fn 无法自证的独立事实，必须保留 Agent 评测。
+  const pageLevelOp = op === 'OPEN_PAGE' || op === 'REDIRECT_TO' || op === 'REFRESH_PAGE';
+
+  // ── 输入类步骤的确定性补强 ──
+  // INPUT_ELEMENT 若没有显式断言，平台存下来的 expected 只是「操作完成，页面正常响应」，
+  // 对评测层没有任何约束：Agent 无法据此判断本步是否已完成，于是倾向于继续往下做，
+  // 越界填完整张表单后撞上步数上限，把一步已成功的动作判成失败。
+  // 这里由编译器补一条「输入框的值等于输入内容」的断言 —— 它是对该步骤最自然、
+  // 也最贴近事实的期望，使 expected 从一句空话变成可执行、可短路的确定性事实。
+  // 仅在完全没有 expectation 时补：作者写了 expectation（哪怕只是 TEXT 文案），
+  // 就说明本步有自己表达的后置条件，不叠加新语义去覆盖它。
+  let autoValueAssertion = '';
+  if (op === 'INPUT_ELEMENT' && exps.length === 0) {
+    // 输入值走 valueExpr：运行时变量生成裸表达式，字面量走 JSON 字符串。
+    // 未解析引用会在这里编译期抛错 —— 这正是本次假绿的直接来源：若输入值与
+    // 补断言的期望值是同一个未解析字面量，等式天然成立，用例必然假绿通过。
+    const inputValueExpr = valueExpr(d.value, ctx, 'INPUT_ELEMENT 输入值');
+    const inputChain = chainExprOrNull(d.context, ctx);
+    if (inputValueExpr && inputChain) {
+      autoValueAssertion = `await engine.expectValue(${inputValueExpr}, ${inputChain}); // 编译器补断言：输入框值等于输入内容`;
+      expLines.push(autoValueAssertion);
+    }
+  }
+
+  const expected = autoValueAssertion
+    ? `元素${describeChain(d.context)}的输入值等于「${describeValue(d.value, ctx)}」`
+    : expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
+
   const emit = (body: string[]) => {
-    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
+    // 短路条件：expected 已被 fn 完全覆盖，且 fn 里确实有可执行内容 ——
+    // body 与断言都为空说明该步骤既无动作也无校验，不能凭「没报错」判通过。
+    const executableLineCount = [...body, ...expLines].length;
+    // P1 纵深防御：断言里若残留未解析占位符，说明解析链路有漏（正常已在
+    // stringExpr 处编译期报错），一律不许短路 —— 自证式断言不能当作确定性事实。
+    const hasUnresolved = [...body, ...expLines].some((b) => /\$\{[^}]+\}/.test(b));
+    const deterministic =
+      expectedFullyCovered && !pageLevelOp && executableLineCount > 0 && !hasUnresolved;
+    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${deterministic ? ', deterministic: true' : ''} }, async () => {`);
     for (const b of [...body, ...expLines]) out.push(`  ${b}`);
     out.push(`});`);
   };
@@ -209,7 +284,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       const body: string[] = [];
       if (resolved.url) {
         body.push(`// 目标页面解析来源: ${resolved.via}`);
-        body.push(`await engine.navigate(${q(resolved.url)});`);
+        body.push(`await engine.navigate(${codeLiteral(resolved.url, 'OPEN_PAGE 目标 URL')});`);
       } else {
         body.push(
           `throw new Error(${q(
@@ -231,7 +306,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       if (!url) {
         throw new Error(`REDIRECT_TO 未解析到目标 URL: ${stepText}`);
       }
-      emit([`await engine.navigate(${q(url)});`, ...waitExprs(d)]);
+      emit([`await engine.navigate(${codeLiteral(url, 'REDIRECT_TO 目标 URL')});`, ...waitExprs(d)]);
       break;
     }
     case 'CLICK_ELEMENT':
@@ -249,7 +324,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       // 少数步骤把待检文案直接放在 value：此时补一条包含断言，与老引擎
       // cy.contains(value).should('be.visible') 语义对齐。
       const val = resolveValue(d.value, ctx);
-      emit(val ? [`await engine.expectText(${q(val)}, ${chain});`] : []);
+      emit(val ? [`await engine.expectText(${valueExpr(d.value, ctx, 'CHECK_TEXT 待检文案')}, ${chain});`] : []);
       break;
     }
     case 'INPUT_ELEMENT': {
@@ -257,12 +332,27 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       if (!val) {
         throw new Error(`INPUT_ELEMENT 缺少输入值，拒绝生成可误报通过的跳过步骤: ${stepText}`);
       }
-      emit([`await engine.type(${q(val)}, ${chain});`, ...waitExprs(d)]);
+      emit([`await engine.type(${valueExpr(d.value, ctx, 'INPUT_ELEMENT 输入值')}, ${chain});`, ...waitExprs(d)]);
       break;
     }
-    case 'MOVE_ELEMENT':
-      emit([`await engine.hover(${chain});`, ...waitExprs(d)]);
+    case 'MOVE_ELEMENT': {
+      // 历史 DSL 把「hover 到某行后再点行内操作」建模成 children:
+      // MOVE_ELEMENT(context=行) + CLICK_ELEMENT(context=更多)。
+      // 只生成 hover 会漏掉动作，下一步「点删除」必然因下拉未展开而失败。
+      const childClicks: string[] = [];
+      for (const childAction of Array.isArray(d.children) ? d.children : []) {
+        const childOp = String(childAction?.operation || '');
+        const childHops = chainExprOrNull(childAction?.context, ctx);
+        if (!childHops) continue;
+        if (childOp === 'CLICK_ELEMENT') childClicks.push(`await engine.click(${childHops});`);
+        else if (childOp === 'FORCE_CLICK_ELEMENT') childClicks.push(`await engine.forceClick(${childHops});`);
+        else if (childOp) {
+          throw new Error(`MOVE_ELEMENT 子动作「${childOp}」暂不支持: ${stepText}`);
+        }
+      }
+      emit([`await engine.hover(${chain});`, ...childClicks, ...waitExprs(d)]);
       break;
+    }
     case 'SCROLL':
       emit([`await engine.scroll(${chain});`, ...waitExprs(d)]);
       break;
@@ -274,7 +364,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       const sel = firstContextSelector(d.context);
       if (sel) {
         const budget = Math.round(waitMs(d) || 10000);
-        emit([`await engine.waitForElement(${q(sel)}, { timeout: ${budget} });`]);
+        emit([`await engine.waitForElement(${codeLiteral(sel, 'WAIT_EVENTS 元素就绪门')}, { timeout: ${budget} });`]);
         break;
       }
       const ms = waitMs(d);
@@ -288,7 +378,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
         throw new Error(`WAIT_RESPONSE 缺少目标 URL，拒绝生成可误报通过的跳过步骤: ${stepText}`);
       }
       const opts = waitResponseOptions(d);
-      emit([`await engine.waitForResponse(${q(urlPart)}${opts});`]);
+      emit([`await engine.waitForResponse(${codeLiteral(urlPart, 'WAIT_RESPONSE 目标 URL')}${opts});`]);
       break;
     }
     case 'REFRESH_PAGE':
@@ -304,7 +394,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
           : undefined);
       const targetCtx = valueCtx || d.child?.context || d.child;
       if (Array.isArray(targetCtx) && targetCtx.length) {
-        emit([`await engine.drag(${chain}, ${chainExpr(targetCtx)});`, ...waitExprs(d)]);
+        emit([`await engine.drag(${chain}, ${chainExpr(targetCtx, ctx)});`, ...waitExprs(d)]);
       } else {
         throw new Error(`DRAGGING 缺少目标元素，拒绝退化为悬停: ${stepText}`);
       }
@@ -314,8 +404,16 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       // 真实数据里表达式写在 context 的 javascript 跳上，value 只是变量名
       const jsHop = firstHopOfType(d.context, 'javascript');
       const expr = jsHop ? String(jsHop.value ?? '') : resolveValue(d.value, ctx) || (typeof d.child === 'string' ? d.child : d.child?.value);
-      if (expr) emit([`await engine.evaluate(${q(String(expr))});`]);
-      else throw new Error(`WRITE_GLOBAL 缺少表达式: ${stepText}`);
+      if (!expr) throw new Error(`WRITE_GLOBAL 缺少表达式: ${stepText}`);
+      const varName = writeGlobalVarName(d, ctx);
+      // 变量提升后的写入：值必须落到场景局部变量上，后续 `${name}` 才有来源。
+      // 非合法标识符（变量名缺失/非法）时不提升，退化为只求值不落库 ——
+      // 这种情况下任何 `${name}` 引用会在解析处编译期报错，不会静默假绿。
+      emit([
+        varName
+          ? `${varName} = await engine.evaluate(${q(String(expr))});`
+          : `await engine.evaluate(${q(String(expr))});`,
+      ]);
       break;
     }
     case 'SCREEN_SHOT':
@@ -323,18 +421,19 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
     case 'TAKE_SCREENSHOT': {
       // 平台截图步骤 → 基线对比断言（无基线建候选，超阈值抛 ScreenshotDiffError）
       const shotName = resolveValue(d.value, ctx) || sanitizeShotKey(stepText);
-      const shotChain = chainExprOrNull(d.context);
+      const shotChain = chainExprOrNull(d.context, ctx);
       // 区域截图容错：元素不在当前页面（权限阻断等）时降级为整页截图，
       // 是否一致由基线比对决定，截图本身不做权限硬门。
       if (shotChain) {
         out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)} }, async () => {`);
         out.push(`  try {`);
-        out.push(`    await engine.screenshot(${q(shotName)}, ${shotChain});`);
+        const shotKeyExpr = codeLiteral(shotName, 'SCREENSHOT 基线 key');
+        out.push(`    await engine.screenshot(${shotKeyExpr}, ${shotChain});`);
         out.push(`  } catch (_shotErr: any) {`);
         out.push(`    // 区域截图失败（元素不在页面上，如权限阻断/加载异常）—— 降级为整页截图`);
         out.push(`    if (/timeout|waiting.*locator|not found|no element/i.test(String(_shotErr?.message || ''))) {`);
-        out.push(`      console.warn('[dsl] 区域截图降级为整页截图:', ${q(shotName)}, _shotErr?.message);`);
-        out.push(`      await engine.screenshot(${q(shotName)});`);
+        out.push(`      console.warn('[dsl] 区域截图降级为整页截图:', ${shotKeyExpr}, _shotErr?.message);`);
+        out.push(`      await engine.screenshot(${shotKeyExpr});`);
         out.push(`    } else { throw _shotErr; }`);
         out.push(`  }`);
         for (const e of d.expectation || []) {
@@ -343,7 +442,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
         }
         out.push(`});`);
       } else {
-        emit([`await engine.screenshot(${q(shotName)});`, ...waitExprs(d)]);
+        emit([`await engine.screenshot(${codeLiteral(shotName, 'SCREENSHOT 基线 key')});`, ...waitExprs(d)]);
       }
       break;
     }
@@ -389,10 +488,10 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
     gates.forEach((g, gi) => {
       const urlPart = resolveValue(g.value, ctx) || String(g.urlPart || '');
       if (!urlPart) return; // 就绪门无目标 URL 时跳过注册，由普通 WAIT_RESPONSE 分支报错
-      body.push(`const __gate${gi} = engine.waitForResponse(${q(urlPart)}${waitResponseOptions(g)}); // 预注册就绪门`);
+      body.push(`const __gate${gi} = engine.waitForResponse(${codeLiteral(urlPart, '就绪门目标 URL')}${waitResponseOptions(g)}); // 预注册就绪门`);
     });
     body.push(`// 目标页面解析来源: ${resolved.via}`);
-    body.push(`await engine.navigate(${q(resolved.url)});`);
+    body.push(`await engine.navigate(${codeLiteral(resolved.url, 'OPEN_PAGE 目标 URL')});`);
     gates.forEach((g, gi) => {
       const urlPart = resolveValue(g.value, ctx) || String(g.urlPart || '');
       if (urlPart) body.push(`await __gate${gi}; // 等 ${String(g.text || '就绪响应')}`);
@@ -425,6 +524,9 @@ export function stepExpectedText(step: DslStep, ctx: ExpectedRenderContext): str
     env: ctx.env,
     variableList: ctx.variableList || [],
     account: ctx.account,
+    // 报告文案入口拿不到整份 dslList，无法识别场景内 WRITE_GLOBAL 变量。
+    // 这里只产出人话文案（未解析引用原样保留，便于排障），不需要运行时变量表。
+    runtimeVars: new Set<string>(),
   };
   return expectedTextOf(step.expectation || [], (e) => resolveExpectationValue(e, renderCtx));
 }
@@ -551,8 +653,11 @@ function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
   if (!type || isTextOnlyAssert(type)) return null;
 
   const comment = e.text ? ` // ${e.text}` : '';
-  const chain = chainExpr(e.context);
+  const chain = chainExpr(e.context, ctx);
+  // 断言值双轨：val 是人话文案（expected 用），valExpr 是脚本里的可执行表达式。
+  // 二者必须分开 —— 文案里保留 `${X}` 便于排障，代码里未解析引用必须编译期报错。
   const val = resolveExpectationValue(e, ctx);
+  const valExpr = expectationValueExpr(e, ctx);
 
   if (!isKnownAssert(type)) {
     // 未知断言不得静默跳过（旧实现只吐注释 = 断言不执行，是假绿的来源之一）
@@ -575,40 +680,41 @@ function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
       // 直接断言 body 文本会把标题里的命中判成失败（页面标题 ≠ 正文文案），
       // 按步骤/断言文案识别出页面标题语义，落到 title 维度。
       if (isPageTitleAssertion(e)) {
-        return `await engine.expectTitle(${q(val)});${comment}`;
+        return `await engine.expectTitle(${valExpr});${comment}`;
       }
-      return `await engine.expectText(${q(val)}, ${chain});${comment}`;
+      return `await engine.expectText(${valExpr}, ${chain});${comment}`;
     case 'TEXT_NOT_EXIST':
       // 平台里存在「只打开页面」类用例：断言存成 TEXT_NOT_EXIST 但期望值为空串。
       // 空串对任何页面都成立，属于无实际约束的占位断言；若照原样下发会变成
       // 「body 文本不包含空串」并永远失败（旧 Cypress 编译器同样只在期望值非空时
       // 才生成 text-absent 校验）。这里按同一语义跳过。
       if (!String(val || '').trim()) return null;
-      return `await engine.expectNotText(${q(val)}, ${chain});${comment}`;
+      return `await engine.expectNotText(${valExpr}, ${chain});${comment}`;
     case 'TEXT_EQUAL':
-      return `await engine.expectTextEquals(${q(val)}, ${chain});${comment}`;
+      return `await engine.expectTextEquals(${valExpr}, ${chain});${comment}`;
     case 'EXPECTED_VALUE':
-      return renderExpectedValue(e, val, chain, comment);
+      return renderExpectedValue(e, val, valExpr, chain, comment);
     case 'EXPECTED__PAGET_VALUE':
-      return renderPageValue(e, val, comment);
+      return renderPageValue(e, val, valExpr, comment);
     case 'SCREEN_SHOT_COMPARE':
     case 'SCREENSHOT_COMPARE':
     case 'IMAGE_COMPARE': {
       // value 为基线 key（老平台基线 id 可回溯迁移来源）
       const shotName = String(val || e.text || '').trim() || sanitizeShotKey(e.text || 'baseline');
-      const shotChain = chainExprOrNull(e.context);
+      const shotChain = chainExprOrNull(e.context, ctx);
+      const shotKeyExpr = codeLiteral(shotName, 'SCREENSHOT 断言基线 key');
       if (shotChain) {
         return [
-          `try { await engine.screenshot(${q(shotName)}, ${shotChain}); }`,
+          `try { await engine.screenshot(${shotKeyExpr}, ${shotChain}); }`,
           `catch (_shotErr: any) {`,
           `  if (/timeout|waiting.*locator|not found|no element/i.test(String(_shotErr?.message || ''))) {`,
-          `    console.warn('[dsl] 区域截图降级为整页截图:', ${q(shotName)}, _shotErr?.message);`,
-          `    await engine.screenshot(${q(shotName)});`,
+          `    console.warn('[dsl] 区域截图降级为整页截图:', ${shotKeyExpr}, _shotErr?.message);`,
+          `    await engine.screenshot(${shotKeyExpr});`,
           `  } else { throw _shotErr; }`,
           `}`,
         ].join(' ');
       }
-      return `await engine.screenshot(${q(shotName)});${comment}`;
+      return `await engine.screenshot(${shotKeyExpr});${comment}`;
     }
     default:
       return `throw new Error(${q(
@@ -643,6 +749,7 @@ function isPageTitleAssertion(e: DslExpectation): boolean {
 function renderExpectedValue(
   e: DslExpectation,
   val: string,
+  valExpr: string,
   chain: string,
   comment: string,
 ): string {
@@ -653,22 +760,22 @@ function renderExpectedValue(
     case 'text':
       if (mode === 'eq') {
         return negated
-          ? `await engine.expectTextNotEquals(${q(val)}, ${chain});${comment}`
-          : `await engine.expectTextEquals(${q(val)}, ${chain});${comment}`;
+          ? `await engine.expectTextNotEquals(${valExpr}, ${chain});${comment}`
+          : `await engine.expectTextEquals(${valExpr}, ${chain});${comment}`;
       }
       return negated
-        ? `await engine.expectNotText(${q(val)}, ${chain});${comment}`
-        : `await engine.expectText(${q(val)}, ${chain});${comment}`;
+        ? `await engine.expectNotText(${valExpr}, ${chain});${comment}`
+        : `await engine.expectText(${valExpr}, ${chain});${comment}`;
     case 'class':
       return negated
-        ? `await engine.expectNotClass(${q(val)}, ${chain});${comment}`
-        : `await engine.expectClass(${q(val)}, ${chain});${comment}`;
+        ? `await engine.expectNotClass(${valExpr}, ${chain});${comment}`
+        : `await engine.expectClass(${valExpr}, ${chain});${comment}`;
     case 'placeholder':
-      return `await engine.expectAttribute(${q('placeholder')}, ${q(val)}, ${chain});${comment}`;
+      return `await engine.expectAttribute(${q('placeholder')}, ${valExpr}, ${chain});${comment}`;
     case 'style':
       return mode === 'eq'
-        ? `await engine.expectAttribute(${q('style')}, ${q(val)}, ${chain});${comment}`
-        : `await engine.expectAttributeContains(${q('style')}, ${q(val)}, ${chain});${comment}`;
+        ? `await engine.expectAttribute(${q('style')}, ${valExpr}, ${chain});${comment}`
+        : `await engine.expectAttributeContains(${q('style')}, ${valExpr}, ${chain});${comment}`;
     case 'index': {
       // index + eq：数「文本非空的元素个数」
       const n = Number(val);
@@ -681,7 +788,7 @@ function renderExpectedValue(
       // 维度未知时不能当成通过 —— 但也不能硬失败：ctype 缺失的历史数据按 text 处理，
       // 明确写了未知维度的才报错。
       if (!e.ctype) {
-        return `await engine.expectText(${q(val)}, ${chain});${comment}`;
+        return `await engine.expectText(${valExpr}, ${chain});${comment}`;
       }
       return `throw new Error(${q(
         `不支持的 EXPECTED_VALUE 比较维度「${ctype}」: ${e.text || ''} —— 请改用 text/class/placeholder/style/index`,
@@ -693,23 +800,23 @@ function renderExpectedValue(
  * EXPECTED__PAGET_VALUE：比页面级属性（历史拼写错误，保留原名）。
  * 真实数据里只有 ctype=url + cexpression=eq。
  */
-function renderPageValue(e: DslExpectation, val: string, comment: string): string {
+function renderPageValue(e: DslExpectation, val: string, valExpr: string, comment: string): string {
   const ctype = String(e.ctype || 'url').toLowerCase();
   const { mode, negated } = parseComparison(String(e.cexpression || 'eq'));
   if (ctype === 'url') {
     if (mode === 'eq') {
       return negated
-        ? `await engine.expectUrlNotEquals(${q(val)});${comment}`
-        : `await engine.expectUrlEquals(${q(val)});${comment}`;
+        ? `await engine.expectUrlNotEquals(${valExpr});${comment}`
+        : `await engine.expectUrlEquals(${valExpr});${comment}`;
     }
     return negated
-      ? `await engine.expectUrlNotContains(${q(val)});${comment}`
-      : `await engine.expectUrlContains(${q(val)});${comment}`;
+      ? `await engine.expectUrlNotContains(${valExpr});${comment}`
+      : `await engine.expectUrlContains(${valExpr});${comment}`;
   }
   if (ctype === 'title') {
     return mode === 'eq'
-      ? `await engine.expectTitleEquals(${q(val)});${comment}`
-      : `await engine.expectTitle(${q(val)});${comment}`;
+      ? `await engine.expectTitleEquals(${valExpr});${comment}`
+      : `await engine.expectTitle(${valExpr});${comment}`;
   }
   return `throw new Error(${q(
     `不支持的页面属性断言维度「${ctype}」: ${e.text || ''} —— 请改用 url/title`,
@@ -717,6 +824,141 @@ function renderPageValue(e: DslExpectation, val: string, comment: string): strin
 }
 
 // ─── 值 / 链解析 ─────────────────────────────────────────────────────
+
+/** 合法 JS 标识符：只有合法名才能提升为场景局部变量 */
+const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/** WRITE_GLOBAL 声明的变量名：真实数据放在 value（{type:'CUSTOM', value:'X'}） */
+function rawWriteGlobalName(d: DslStep): string {
+  const v: any = d?.value;
+  if (typeof v === 'string') return v.trim();
+  if (v && typeof v === 'object') return String(v.value ?? '').trim();
+  if (typeof d?.child === 'string') return d.child.trim();
+  return '';
+}
+
+/**
+ * 扫描全场景，收集 WRITE_GLOBAL 声明的运行时变量名。
+ *
+ * 只有合法标识符才纳入提升集合；非法名（含 `${}`、空格等）不提升，且任何
+ * `${非法名}` 引用会在 valueExpr 处编译期报错，不会退化成字面量假绿。
+ */
+function collectWriteGlobalVars(dslList: DslStep[]): Set<string> {
+  const out = new Set<string>();
+  for (const d of Array.isArray(dslList) ? dslList : []) {
+    if (String(d?.operation || '') !== 'WRITE_GLOBAL') continue;
+    const name = rawWriteGlobalName(d);
+    if (name && IDENT_RE.test(name)) out.add(name);
+  }
+  return out;
+}
+
+/** WRITE_GLOBAL 的写入目标（提升变量）名；不可提升时返回空串 */
+function writeGlobalVarName(d: DslStep, ctx: RenderCtx): string {
+  const name = rawWriteGlobalName(d);
+  return name && IDENT_RE.test(name) && ctx.runtimeVars.has(name) ? name : '';
+}
+
+/** 已知来源占位符替换：账号占位 + 变量表按名引用（不做严格性校验） */
+function interpolateKnown(raw: string, ctx: RenderCtx, stepValue?: DslValue): string {
+  const interpolated = String(raw ?? '')
+    .replace(/\$\{loginName\}/g, ctx.account?.name ?? '')
+    .replace(/\$\{pwd\}/g, ctx.account?.password ?? '');
+  return interpolated.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name: string) => {
+    const row = (ctx.variableList || []).find((r) => String(r.name) === String(name));
+    if (!row) return m;
+    const u = buildVariableUrl(row, ctx.env, {}, stepValue);
+    return u || m;
+  });
+}
+
+/** js 模板字面量片段转义（`\`、反引号；`${` 由调用方逐段拼装） */
+function escapeTemplate(s: string): string {
+  return String(s ?? '').replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+}
+
+/**
+ * 字符串 → **可执行表达式**（代码发射路径的唯一入口）。
+ *
+ * 与 resolveValue 的区别：后者面向人话文案（expected），未解析占位符原样保留；
+ * 本函数面向生成的脚本源码，必须保证「落到代码里的东西真的能取到值」：
+ *   - 已被已知来源（账号/变量表）解析 → 字符串字面量
+ *   - 引用场景内 WRITE_GLOBAL 提升的变量 → 裸标识符 / 模板字面量（运行时取值）
+ *   - **其余未解析 `${X}` → 编译期硬报错**，绝不静默透传成字面量
+ *
+ * 第三条是本次假绿的根因防线：未解析值一旦透传，`engine.type(x)` 与编译器补的
+ * `engine.expectValue(x)` 会共用同一个字面量，断言天然成立，用例假绿通过。
+ */
+function stringExpr(raw: string, ctx: RenderCtx, where: string, stepValue?: DslValue): string {
+  const interpolated = interpolateKnown(raw, ctx, stepValue);
+  const refs = [...interpolated.matchAll(/\$\{([^}]+)\}/g)].map((m) => String(m[1]).trim());
+  for (const name of refs) {
+    if (ctx.runtimeVars.has(name)) continue;
+    throw new Error(
+      `未解析的变量引用 \${${name}}（${where}）—— 该名称既不在变量表中，`
+        + '也不由本场景内的 WRITE_GLOBAL 写入。跨场景引用不会自动传递，'
+        + '请让用例自包含（在变量表配置该名称，或在本场景内先 WRITE_GLOBAL 写入）',
+    );
+  }
+  if (!refs.length) return q(interpolated);
+
+  // 整体就是一个变量引用：直接取运行时值（统一 String 化，匹配标量输入/文案语义）
+  const whole = /^\s*\$\{([^}]+)\}\s*$/.exec(interpolated);
+  if (whole && ctx.runtimeVars.has(whole[1].trim())) return `String(${whole[1].trim()})`;
+
+  // 内嵌引用 → 模板字面量，逐段转义后拼装
+  let body = '';
+  let last = 0;
+  for (const m of interpolated.matchAll(/\$\{([^}]+)\}/g)) {
+    const at = m.index ?? 0;
+    body += escapeTemplate(interpolated.slice(last, at));
+    body += '${String(' + String(m[1]).trim() + ')}';
+    last = at + m[0].length;
+  }
+  body += escapeTemplate(interpolated.slice(last));
+  return '`' + body + '`';
+}
+
+/** DSL 值 → 可执行表达式（字符串字面量 或 运行时变量引用） */
+function valueExpr(v: DslValue, ctx: RenderCtx, where: string): string {
+  if (v === null || v === undefined) return q('');
+  if (typeof v === 'number') return q(String(v));
+  if (typeof v === 'string') return stringExpr(v, ctx, where, v);
+  const raw = String((v as any).value ?? '');
+  if ((v as any).type === 'VARIABLE') {
+    const row = ctx.variableList.find((r) => Number(r.id) === Number(raw));
+    if (!row) return q('');
+    return q(buildVariableUrl(row, ctx.env, {}, v));
+  }
+  return stringExpr(raw, ctx, where, v);
+}
+
+/**
+ * 已解析字符串 → 代码字面量（纵深防御）。
+ *
+ * 用于「已经过 variableList / 账号插值、但不再走运行时变量表」的发射点
+ * （WAIT_RESPONSE 的 URL 片段、元素就绪门选择器、截图基线 key 等）。
+ * 若仍残留 `${X}`，说明该引用无处取值 —— 落到代码里只会变成永远匹配不到的字面量，
+ * 宁可编译期报错，也不要生成一个静默失败/静默假绿的步骤。
+ */
+function codeLiteral(s: string, where: string): string {
+  const refs = [...String(s ?? '').matchAll(/\$\{([^}]+)\}/g)].map((m) => String(m[1]).trim());
+  if (refs.length) {
+    throw new Error(
+      `未解析的变量引用 \${${refs[0]}}（${where}）—— 该名称不在变量表中，`
+        + '也不是本场景 WRITE_GLOBAL 可写入的位置（仅 INPUT_ELEMENT 等值的来源支持运行时变量）',
+    );
+  }
+  return q(String(s ?? ''));
+}
+
+/** 变量表达式 → 人话文案（expected 用）：运行时变量显示为「变量「X」」 */
+function describeValue(v: DslValue, ctx: RenderCtx): string {
+  const raw = typeof v === 'object' && v !== null ? String((v as any).value ?? '') : String(v ?? '');
+  const whole = /^\s*\$\{([^}]+)\}\s*$/.exec(raw);
+  if (whole && ctx.runtimeVars.has(whole[1].trim())) return `运行时变量「${whole[1].trim()}」`;
+  return resolveValue(v, ctx) || raw;
+}
 
 /**
  * OPEN_PAGE 目标页面解析（三级）：
@@ -862,7 +1104,13 @@ function pickVariableValue(row: DslVariableRow, env: string): string {
   return String(row[env] ?? '');
 }
 
-/** DSL value → 字面量：CUSTOM 插值账号占位；VARIABLE 查变量表取环境列 */
+/**
+ * DSL value → 字面量（**仅用于人话文案 / expected**）。
+ *
+ * CUSTOM 插值账号占位 + 按变量名引用变量表；VARIABLE 查变量表取环境列。
+ * ⚠ 未命中时保留 `${X}` 原样，便于作者在报告里看见未解析引用。
+ * **代码发射路径禁止调用本函数** —— 那里未解析引用必须编译期报错（见 stringExpr）。
+ */
 function resolveValue(v: DslValue, ctx: RenderCtx): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'string' || typeof v === 'number') return String(v);
@@ -873,15 +1121,7 @@ function resolveValue(v: DslValue, ctx: RenderCtx): string {
     return buildVariableUrl(row, ctx.env, {}, v);
   }
   // CUSTOM：插值账号占位 + 按变量名引用变量表
-  const interpolated = raw
-    .replace(/\$\{loginName\}/g, ctx.account?.name ?? '')
-    .replace(/\$\{pwd\}/g, ctx.account?.password ?? '');
-  return interpolated.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name: string) => {
-    const row = (ctx.variableList || []).find((r) => String(r.name) === String(name));
-    if (!row) return m;
-    const u = buildVariableUrl(row, ctx.env, {}, v);
-    return u || m;
-  });
+  return interpolateKnown(raw, ctx, v);
 }
 
 /** 断言取期望值：VARIABLE 优先查 id，其次按 name（历史数据两种都存过） */
@@ -896,18 +1136,43 @@ function resolveExpectationValue(e: DslExpectation, ctx: RenderCtx): string {
   return resolveValue(v, ctx);
 }
 
-/** context 多跳 → C(...) 链表达式（selector/class/includes/text 原样透传） */
-function chainExpr(context: DslHop[] | undefined): string {
+/**
+ * 断言期望值 → 可执行表达式。
+ *
+ * 与 resolveExpectationValue 同源同序（VARIABLE 优先 id、再按 name），只是末尾
+ * 从「字面量」改为「表达式」：未解析的 `${X}` 在这里编译期报错，而不是渲染成
+ * 与输入值相同的字面量，避免 `type(x); expectValue(x)` 自证假绿。
+ */
+function expectationValueExpr(e: DslExpectation, ctx: RenderCtx): string {
+  const v = e.value;
+  if (v && typeof v === 'object' && v.type === 'VARIABLE') {
+    const raw = String(v.value ?? '');
+    const byId = ctx.variableList.find((r) => Number(r.id) === Number(raw));
+    const byName = byId || ctx.variableList.find((r) => String(r.name) === raw);
+    // 变量表命中 → 生成期固化为字面量（与 resolveExpectationValue 一致）
+    if (byName) return q(pickVariableValue(byName, ctx.env) || raw);
+  }
+  return valueExpr(v, ctx, `断言「${e.text || e.type || ''}」的期望值`);
+}
+
+/**
+ * context 多跳 → C(...) 链表达式。
+ *
+ * 跳值同样要过变量解析：定位链里的 `${X}`（如「包含 DashboardName 的行」）
+ * 若不解析会变成字面量选择器，必然匹配不到任何元素。这里统一走 stringExpr，
+ * 未解析引用同样编译期报错。
+ */
+function chainExpr(context: DslHop[] | undefined, ctx: RenderCtx): string {
   const hops = collectHops(context);
   if (!hops.length) return `C({ type: 'selector', value: 'body' })`;
-  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${q(h.value)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
+  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${stringExpr(h.value, ctx, `定位链 ${h.type}`)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
 }
 
 /** 同 chainExpr，但无有效跳时返回 ''（截图对比：无上下文 = 整页截图） */
-function chainExprOrNull(context: DslHop[] | undefined): string {
+function chainExprOrNull(context: DslHop[] | undefined, ctx: RenderCtx): string {
   const hops = collectHops(context);
   if (!hops.length) return '';
-  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${q(h.value)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
+  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${stringExpr(h.value, ctx, `定位链 ${h.type}`)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
 }
 
 interface CollectedHop {

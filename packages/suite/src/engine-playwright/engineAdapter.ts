@@ -258,6 +258,17 @@ export class PlaywrightEngine implements EngineAdapter {
     await pwExpect(locator.first()).not.toHaveText(expected);
   }
 
+  /**
+   * 表单元素当前值断言（input/textarea/select 的 value）。
+   *
+   * 必须用 toHaveValue 而不是 toHaveText：input 的 textContent 恒为空，
+   * 文本断言对用户输入永远失败，会把它误判成用例缺陷。
+   */
+  async expectValue(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+    const locator = this.resolve(refs);
+    await pwExpect(locator.first()).toHaveValue(expected);
+  }
+
   async expectCount(count: number, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolve(refs);
     await pwExpect(locator).toHaveCount(count);

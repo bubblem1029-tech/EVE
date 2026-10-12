@@ -12,7 +12,7 @@
  *   selector/id/shadow-dom → CSS
  *   class                  → .a.b（空格分隔多 class）
  *   includes/text          → 文本包含，取「包含该文本的最深（最小）元素」
- *   label                  → 可见 label 关联的表单控件
+ *   label                  → HTML 标签名按标签选择器；非标签名回退「可见 label 关联控件」
  *   iframe-url             → 同源 iframe 内继续；跨源标记 cross-origin-iframe
  *   javascript/source/''   → 跳过
  *   hop.index              → 1-based；-1/0/非数字表示不取序号
@@ -26,7 +26,7 @@
 export function locatorSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveLocatorSource === "v1") return "cached";
+  if (window.__keveLocatorSource === "v5") return "cached";
 
   function classToCss(v) {
     return String(v).trim().split(/\\s+/).filter(Boolean).map(function (c) {
@@ -67,9 +67,45 @@ export function locatorSource(): string {
     return d;
   }
 
-  /** label 文本 → 关联控件：label[for] / 控件嵌套于 label / aria-label */
+  /** 归一化用于文本定位的句子：统一空白与半/全角标点，并忽略成对的中文引号装饰 */
+  function normalizeText(str) {
+    return String(str == null ? "" : str)
+      .normalize("NFKC")
+      .replace(/[「」『』【】《》“”‘’]/g, "")
+      .replace(/\\s+/g, " ")
+      .trim();
+  }
+
+  var HTML_TAGS = {
+    "a": 1, "abbr": 1, "address": 1, "article": 1, "aside": 1, "audio": 1, "b": 1, "base": 1,
+    "bdi": 1, "bdo": 1, "blockquote": 1, "body": 1, "br": 1, "button": 1, "canvas": 1, "caption": 1,
+    "cite": 1, "code": 1, "col": 1, "colgroup": 1, "data": 1, "datalist": 1, "dd": 1, "del": 1,
+    "details": 1, "dfn": 1, "dialog": 1, "div": 1, "dl": 1, "dt": 1, "em": 1, "embed": 1,
+    "fieldset": 1, "figcaption": 1, "figure": 1, "footer": 1, "form": 1, "h1": 1, "h2": 1,
+    "h3": 1, "h4": 1, "h5": 1, "h6": 1, "head": 1, "header": 1, "hgroup": 1, "hr": 1, "html": 1,
+    "i": 1, "iframe": 1, "img": 1, "input": 1, "ins": 1, "kbd": 1, "label": 1, "legend": 1,
+    "li": 1, "link": 1, "main": 1, "map": 1, "mark": 1, "menu": 1, "meta": 1, "meter": 1,
+    "nav": 1, "noscript": 1, "object": 1, "ol": 1, "optgroup": 1, "option": 1, "output": 1,
+    "p": 1, "picture": 1, "pre": 1, "progress": 1, "q": 1, "rp": 1, "rt": 1, "ruby": 1, "s": 1,
+    "samp": 1, "script": 1, "section": 1, "select": 1, "slot": 1, "small": 1, "source": 1,
+    "span": 1, "strong": 1, "style": 1, "sub": 1, "summary": 1, "sup": 1, "table": 1, "tbody": 1,
+    "td": 1, "template": 1, "textarea": 1, "tfoot": 1, "th": 1, "thead": 1, "time": 1, "title": 1,
+    "tr": 1, "track": 1, "u": 1, "ul": 1, "var": 1, "video": 1, "wbr": 1,
+  };
+
+  /** label 语义：HTML 标签名 → 标签选择器（含最近祖先回退）；否则按 label 文本找关联控件 */
   function byLabel(root, text) {
-    var needle = String(text).trim();
+    var raw = String(text == null ? "" : text).trim();
+    if (/^[A-Za-z][A-Za-z0-9-]*$/.test(raw) && HTML_TAGS[raw.toLowerCase()]) {
+      var tagOut = queryAllDeep(root, raw);
+      // includes 常收敛到行内最深文本节点；
+      // 若目标是祖先标签，直接按后代查会落空，补充最近同名祖先回退。
+      var ancestor = null;
+      if (root && root.nodeType === 1 && root.closest) ancestor = root.closest(raw);
+      if (ancestor && tagOut.indexOf(ancestor) < 0) tagOut.unshift(ancestor);
+      return tagOut;
+    }
+    var needle = raw;
     var labels = queryAllDeep(root, "label");
     for (var i = 0; i < labels.length; i += 1) {
       var lab = labels[i];
@@ -83,16 +119,16 @@ export function locatorSource(): string {
             if (candidates[c].id === forId) { byId = candidates[c]; break; }
           }
         }
-        if (byId) return byId;
+        if (byId) return [byId];
       }
       var nested = queryAll(lab, "input,textarea,select,button,[role]")[0];
-      if (nested) return nested;
+      if (nested) return [nested];
     }
     var aria = queryAllDeep(root, "[aria-label]");
     for (var a = 0; a < aria.length; a += 1) {
-      if (String(aria[a].getAttribute("aria-label") || "").indexOf(needle) >= 0) return aria[a];
+      if (String(aria[a].getAttribute("aria-label") || "").indexOf(needle) >= 0) return [aria[a]];
     }
-    return null;
+    return [];
   }
 
   /**
@@ -131,25 +167,41 @@ export function locatorSource(): string {
     for (var s = 0; s < scopeEls.length; s += 1) {
       var scope = scopeEls[s];
       if (type === "includes" || type === "text") {
-        var needle = String(value).trim();
+        var needle = normalizeText(value);
         if (!needle) continue;
+        // Playwright text= 会让「元素自身直挂文本」也能命中；这里除后代外把
+        // scope 本身也作为候选，避免 selector → text 链把直挂文本落空。
         var all = queryAllDeep(scope, "*");
         var hits = [];
+        if (normalizeText(scope.textContent).indexOf(needle) >= 0) hits.push(scope);
         for (var i = 0; i < all.length; i += 1) {
-          if (String(all[i].textContent || "").indexOf(needle) >= 0) hits.push(all[i]);
+          if (normalizeText(all[i].textContent).indexOf(needle) >= 0) hits.push(all[i]);
         }
         if (!hits.length) continue;
-        // 「最小元素」= 命中里最深的一个（与 Playwright text= 命中叶子节点一致）
-        var best = hits[0], bestDepth = depthOf(best);
-        for (var h = 1; h < hits.length; h += 1) {
-          var d = depthOf(hits[h]);
-          if (d > bestDepth) { bestDepth = d; best = hits[h]; }
+        // 文本匹配默认取命中里最深的一个（与 Playwright text= 命中叶子节点一致），
+        // 但页面可能残留隐藏弹窗里的禁用按钮，这里优先从「可见且未禁用」的命中里选，
+        // 没有可见候选时才回退到全部命中，避免 text=确定 点到隐藏禁用按钮。
+        var candidates = hits.filter(function (el) {
+          if (el.disabled) return false;
+          try {
+            var style = window.getComputedStyle(el);
+            if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+            var rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) return false;
+          } catch (e) { /* default to enabled candidate */ }
+          return true;
+        });
+        if (!candidates.length) candidates = hits;
+        var best = candidates[0], bestDepth = depthOf(best);
+        for (var h = 1; h < candidates.length; h += 1) {
+          var d = depthOf(candidates[h]);
+          if (d > bestDepth) { bestDepth = d; best = candidates[h]; }
         }
         picked.push(best);
       } else if (type === "label") {
-        var ctl = byLabel(scope, value);
-        if (!ctl) continue;
-        picked.push(ctl);
+        var ctlMatches = byLabel(scope, value);
+        if (!ctlMatches.length) continue;
+        picked = picked.concat(ctlMatches);
       } else if (type === "role") {
         var spec = value && typeof value === "object" ? value : { role: value };
         picked = picked.concat(resolveByRoleIn([scope], spec.role, spec.name));
@@ -159,7 +211,7 @@ export function locatorSource(): string {
         });
         picked = picked.concat(refHits);
       } else if (type === "has-text") {
-        if (String(scope.textContent || "").indexOf(String(value)) >= 0) picked.push(scope);
+        if (normalizeText(scope.textContent).indexOf(normalizeText(value)) >= 0) picked.push(scope);
       } else if (type === "has-sub") {
         if (resolveWithin(scope, value).length) picked.push(scope);
       } else if (type === "not-has-sub") {
@@ -315,7 +367,7 @@ export function locatorSource(): string {
     accessibleName: accessibleName,
     implicitRole: implicitRole,
   };
-  window.__keveLocatorSource = "v1";
+  window.__keveLocatorSource = "v5";
   return "ok";
 })()`;
 }

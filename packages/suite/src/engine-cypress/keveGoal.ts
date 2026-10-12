@@ -24,6 +24,15 @@ export interface KeveGoalCallOptions {
   precondition?: string;
   step: string;
   expected: string;
+  /**
+   * 该 goal 的预期是否已被 fn 内的可执行断言完全覆盖。
+   *
+   * 由 DSL 编译器在「步骤无显式断言、但编译器补了确定性断言」时置为 true。
+   * 置位后 fn 无异常即等价于 expected 达成，无需再进 Agent Re-Act ——
+   * 否则 Agent 会按字面把「输入」理解为「把表单填完」，越界操作直到撞上
+   * 步数上限，把一步已成功的动作判成失败。
+   */
+  deterministic?: boolean;
 }
 
 /** agent Re-Act 的结果（P0-3 接入；未接入时由 fn 结果直接判定） */
@@ -173,6 +182,25 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
         agentScreenshots: [],
       };
       console.log(`[keveGoal] 📊 "${options.step}" 截图差异超阈值 — 确定性失败`);
+    } else if (options.deterministic && fn && !fnError) {
+      // ── 确定性短路：fn 内的断言已完整覆盖 expected ──
+      // 与 fnBlocked / 截图差异同属「确定性事实」，不进 Re-Act。
+      // 进入 Re-Act 只会让 Agent 重读一句宽泛的步骤文案，把动作做到本步之外。
+      reactResult = {
+        expectedMet: true,
+        conclusion: 'pass',
+        actions: [{
+          action: {
+            tool: 'done',
+            verdict: 'pass',
+            text: `Deterministic step: fn 断言已通过（${options.expected}）`,
+          },
+          toolOutput: '',
+          result: 'ok',
+        }],
+        agentScreenshots: [],
+      };
+      console.log(`[keveGoal] ⚡ "${options.step}" 确定性步骤 — fn 断言通过，跳过 Agent Re-Act`);
     } else {
       // fn 成功 / 失败都交给评测器。fn 只是前置动作与确定性校验：
       //  - fn 成功 ≠ expected 达成（fn 可能只覆盖预期的一个子集）；

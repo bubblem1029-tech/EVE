@@ -327,7 +327,7 @@ export class CyAgentPage implements AgentPage {
 
   private async ensureAgent(): Promise<void> {
     const ready = await this.cdp
-      .evaluateInAut<boolean>('Boolean(window.__keveAgentSource === "v1")')
+      .evaluateInAut<boolean>('Boolean(window.__keveAgentSource === "v7")')
       .catch(() => false);
     if (ready) return;
     const { locatorSource } = await import('../dsl/locatorSource.js');

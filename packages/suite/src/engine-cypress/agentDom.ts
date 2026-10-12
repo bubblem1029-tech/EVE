@@ -21,7 +21,7 @@
 export function agentDomSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveAgentSource === "v1") return "cached";
+  if (window.__keveAgentSource === "v7") return "cached";
 
   var MAX_NAME = 120;
   var MAX_LINES = 1500;
@@ -138,7 +138,16 @@ export function agentDomSource(): string {
   }
 
   function allText(el) {
-    return String(el.textContent || "").replace(/\\s+/g, " ").trim();
+    return normalizeText(el.textContent);
+  }
+
+  /** 归一化用于文本匹配的句子：统一空白与半/全角标点，并忽略成对的中文引号装饰 */
+  function normalizeText(str) {
+    return String(str == null ? "" : str)
+      .normalize("NFKC")
+      .replace(/[「」『』【】《》“”‘’]/g, "")
+      .replace(/\\s+/g, " ")
+      .trim();
   }
 
   function isVisible(el) {
@@ -317,7 +326,7 @@ export function agentDomSource(): string {
 
   /** 文本匹配取「包含该文本的最深元素」，与 locatorSource 的 includes 跳一致 */
   function textIn(scopes, needle, exact) {
-    var want = String(needle == null ? "" : needle).replace(/\\s+/g, " ").trim();
+    var want = normalizeText(needle);
     if (!want) return [];
     var hits = [];
     for (var s = 0; s < scopes.length; s += 1) {
@@ -326,19 +335,46 @@ export function agentDomSource(): string {
         ? queryAllDeep(document, "*")
         : queryAllDeep(scope, "*");
       var local = [];
+      // 与 locatorSource 的 includes/text 一致：scope 自身也可直挂目标文本
+      if (scope !== document) {
+        var selfText = allText(scope);
+        if (selfText && (exact ? selfText === want : selfText.indexOf(want) >= 0)) local.push(scope);
+      }
       for (var i = 0; i < pool.length; i += 1) {
         var text = allText(pool[i]);
         if (!text) continue;
         if (exact ? text === want : text.indexOf(want) >= 0) local.push(pool[i]);
       }
+      var outer = [];
       for (var j = 0; j < local.length; j += 1) {
         var el = local[j];
         var hasInnerMatch = false;
         for (var k = 0; k < local.length; k += 1) {
           if (k !== j && el.contains(local[k])) { hasInnerMatch = true; break; }
         }
-        if (!hasInnerMatch) hits.push(el);
+        if (!hasInnerMatch) outer.push(el);
       }
+      if (!outer.length) continue;
+      // 与 locatorSource 保持一致：优先可见且未禁用的最深元素，
+      // 否则回退全部命中，避免隐藏弹窗中的禁用按钮抢走 text 命中。
+      var visible = outer.filter(function (el) {
+        if (el.disabled) return false;
+        try {
+          var style = window.getComputedStyle(el);
+          if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+          var rect = el.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return false;
+        } catch (e) { /* enable fallback */ }
+        return true;
+      });
+      var pool = visible.length ? visible : outer;
+      var deepest = pool[0], maxDepth = -1;
+      for (var p = 0; p < pool.length; p += 1) {
+        var dd = 0, cur = pool[p];
+        while (cur && cur.parentElement) { dd += 1; cur = cur.parentElement; }
+        if (dd > maxDepth) { maxDepth = dd; deepest = pool[p]; }
+      }
+      hits.push(deepest);
     }
     return dedupe(hits);
   }
@@ -434,19 +470,63 @@ export function agentDomSource(): string {
     el.dispatchEvent(new MouseEvent(type, base));
   }
 
+  /** 对应 pageOps.dragTapTarget：KwaiBI v-drag-no-tap 要求点中 c-toolbar-item */
+  function dragTapTarget(el) {
+    if (!el) return null;
+    var cur = el.nodeType === 1 ? el : (el.parentElement || null);
+    while (cur) {
+      var cls = String(cur.getAttribute && cur.getAttribute("class") || "");
+      if (cls.indexOf("c-toolbar-item") >= 0) return cur;
+      cur = cur.parentElement;
+    }
+    if (el.nodeType === 1 && el.querySelector) {
+      var found = el.querySelector(".c-toolbar-item");
+      if (found) return found;
+    }
+    return null;
+  }
+
   function clickEl(el, dbl) {
+    var _orig = el;
+    el = dragTapTarget(el) || interactiveTarget(el);
+    // 与 pageOps 一致：真实点击前先有 mouseover/mousemove，
+    // 否则 hover 才展开的菜单（el-dropdown-selfdefine 等）不会打开。
+    if (_orig && _orig.scrollIntoView) _orig.scrollIntoView({ block: "center" });
+    if (_orig) { fire(_orig, "mouseover"); fire(_orig, "mouseenter"); fire(_orig, "mousemove"); }
     if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "center" });
     if (el.focus) { try { el.focus(); } catch (e) { /* 忽略 */ } }
     fire(el, "mousedown");
     fire(el, "mouseup");
+    // 与 pageOps.clickEl 保持一致：el.click() 已派发 click，不能再补合成 click，
+    // 否则一次点击会触发两遍处理逻辑（弹窗类元素会叠出两层）。
     if (typeof el.click === "function") el.click();
     else fire(el, "click");
-    fire(el, "click");
     if (dbl) {
       fire(el, "mousedown", { detail: 2 });
       fire(el, "mouseup", { detail: 2 });
       fire(el, "dblclick", { detail: 2 });
     }
+  }
+
+  /** 文本定位常命中按钮内零尺寸 span；点击类动作应上溯到最近可交互祖先 */
+  function interactiveTarget(el) {
+    function clickable(node) {
+      if (!node || node.nodeType !== 1) return false;
+      var tag = String(node.tagName || "").toUpperCase();
+      var role = node.getAttribute && node.getAttribute("role");
+      if (tag === "BUTTON" || tag === "A" || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "SUMMARY") return true;
+      if (role && /button|link|menuitem|checkbox|radio|switch|tab|option/.test(role)) return true;
+      if (node.getAttribute && (node.hasAttribute("onclick") || node.hasAttribute("ng-click"))) return true;
+      try { if (window.getComputedStyle(node).cursor === "pointer") return true; } catch (e) { /* ignore */ }
+      return false;
+    }
+    if (clickable(el)) return el;
+    var cur = el && el.parentElement;
+    while (cur) {
+      if (clickable(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return el;
   }
 
   function setNativeValue(el, value) {
@@ -577,7 +657,7 @@ export function agentDomSource(): string {
     focus: function (ops, index) { var el = pickOrThrow(resolve(ops), index); if (el.focus) el.focus(); return "ok"; },
     evalScript: function (src) { return (0, eval)(String(src)); },
   };
-  window.__keveAgentSource = "v1";
+  window.__keveAgentSource = "v7";
   return "ok";
 })()`;
 }

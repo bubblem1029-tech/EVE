@@ -54,6 +54,14 @@ export interface KeveGoalCallOptions {
   precondition?: string;
   step: string;
   expected: string;
+  /**
+   * 该 goal 的预期是否已被 fn 内的可执行断言完全覆盖。
+   *
+   * 由 DSL 编译器在「步骤无显式断言、但编译器补了确定性断言」时置为 true。
+   * 与 Cypress 侧同构：置位后 fn 无异常即等价于 expected 达成，跳过 Agent Re-Act，
+   * 避免 Agent 按字面把「输入」扩大成「把表单填完」而越界操作。
+   */
+  deterministic?: boolean;
 }
 
 type KeveFixture = {
@@ -285,6 +293,26 @@ export const test = base.extend<KeveFixture>({
             finalSnapshot: '',
             agentScreenshots: [],
             conclusion: 'fail' as const,
+          };
+        } else if (options.deterministic && fn && !fnError) {
+          // ── 确定性短路：fn 内的断言已完整覆盖 expected ──
+          // 与 Cypress 侧同构。Agent Re-Act 在这个场景没有可提供的信息，
+          // 只会重读宽泛步骤文案并把动作做到本步之外。
+          console.log(`[keveGoal] ⚡ "${options.step}" deterministic step — fn 断言通过，跳过 Agent Re-Act`);
+          reactResult = {
+            expectedMet: true,
+            actions: [{
+              action: {
+                tool: 'done',
+                verdict: 'pass',
+                text: `Deterministic step: fn 断言已通过（${options.expected}）`,
+              },
+              toolOutput: '',
+              result: 'ok',
+            }],
+            finalSnapshot: '',
+            agentScreenshots: [],
+            conclusion: 'pass' as const,
           };
         } else {
         // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──

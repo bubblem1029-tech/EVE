@@ -16,7 +16,7 @@
 export function pageOpsSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveOpsSource === "v1") return "cached";
+  if (window.__keveOpsSource === "v7") return "cached";
 
   function locator() {
     if (!window.__keveLocator) throw new Error("[keve] locator 未注入");
@@ -59,14 +59,82 @@ export function pageOpsSource(): string {
     el.dispatchEvent(new MouseEvent(type, init));
   }
 
+  /** 文本定位常命中按钮内零尺寸 span；点击类动作应上溯到最近可交互祖先 */
+  function interactiveTarget(el) {
+    function clickable(node) {
+      if (!node || node.nodeType !== 1) return false;
+      var tag = String(node.tagName || "").toUpperCase();
+      var role = node.getAttribute && node.getAttribute("role");
+      if (tag === "BUTTON" || tag === "A" || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "SUMMARY") return true;
+      if (role && /button|link|menuitem|checkbox|radio|switch|tab|option/.test(role)) return true;
+      if (node.getAttribute && (node.hasAttribute("onclick") || node.hasAttribute("ng-click"))) return true;
+      try { if (window.getComputedStyle(node).cursor === "pointer") return true; } catch (e) { /* ignore */ }
+      return false;
+    }
+    if (clickable(el)) return el;
+    var cur = el && el.parentElement;
+    while (cur) {
+      if (clickable(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return el;
+  }
+
+  /**
+   * KwaiBI 图表工具栏把 mousedown/mouseup 绑定在 grid-free-item.c-toolbar-item
+   * 上（v-drag-no-tap 指令），且要求 down/up 落在同一个元素。data-e2e-name
+   * 常挂在外层 SPAN 或 c-toolbar-item-container 上，只点上溯祖先不会触发。
+   */
+  function dragTapTarget(el) {
+    if (!el) return null;
+    var cur = el.nodeType === 1 ? el : (el.parentElement || null);
+    while (cur) {
+      var cls = String(cur.getAttribute && cur.getAttribute("class") || "");
+      if (cls.indexOf("c-toolbar-item") >= 0) return cur;
+      cur = cur.parentElement;
+    }
+    if (el.nodeType === 1 && el.querySelector) {
+      var found = el.querySelector(".c-toolbar-item");
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** 悬停事件序列：部分下拉/弹层（el-dropdown-selfdefine / el-popover__reference）由 hover 打开 */
+  function hoverEl(el) {
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    mouse(el, "mouseover");
+    mouse(el, "mouseenter");
+    mouse(el, "mousemove");
+  }
+
   function clickEl(el, dbl) {
+    var _orig = el;
+    // 若命中 drag-no-tap 工具栏项或其容器，事件必须落在该子项上；
+    // 普通元素仍按可交互祖先处理。
+    el = dragTapTarget(el) || interactiveTarget(el);
+    // 点击前补真实鼠标移动序列：浏览器点击本身会先产生 mouseover/mousemove，
+    // 缺了它会让依赖 hover 展开的下拉菜单按钮（如 KwaiBI 表格菜单）不生效。
+    hoverEl(_orig);
+    try {
+      window.__keveLastClick = {
+        origTag: _orig && _orig.tagName,
+        origCls: _orig && (_orig.getAttribute && _orig.getAttribute("class") || ""),
+        tag: el && el.tagName,
+        cls: el && (el.getAttribute && el.getAttribute("class") || ""),
+        at: Date.now(),
+      };
+    } catch (e) { /* debug */ }
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus && el.focus();
     mouse(el, "mousedown");
     mouse(el, "mouseup");
+    // 单次点击只能派发一个 click：el.click() 自身即会派发 click，
+    // 再补一个合成 click 会让「打开弹窗」这类幂等性差的处理逻辑执行两次
+    // （实测一次「新建看板」会叠出两层 el-dialog，后续取 els[0] 命中被遮住的底层）。
     if (typeof el.click === "function") el.click();
     else mouse(el, "click");
-    mouse(el, "click");
     if (dbl) {
       mouse(el, "mousedown", 2);
       mouse(el, "mouseup", 2);
@@ -99,6 +167,13 @@ export function pageOpsSource(): string {
     return t.replace(/\\s+/g, " ").trim();
   }
 
+  // 表单元素当前值：只读 value，不回退 textContent。
+  // 输入类断言必须用它 —— input 的 textContent 恒为空，textOf 取不到用户输入。
+  function valueOf(el) {
+    if (!el) return "";
+    return el.value != null ? String(el.value) : "";
+  }
+
   function attrOf(el, name) {
     if (!el) return null;
     return el.getAttribute(name);
@@ -128,6 +203,7 @@ export function pageOpsSource(): string {
     },
     text: function (refs) { return textOf(first(refs)); },
     texts: function (refs) { return resolve(refs).map(textOf); },
+    value: function (refs) { return valueOf(first(refs)); },
     visible: function (refs) { return isVisible(first(refs)); },
     hidden: function (refs) { var els = resolve(refs); return !els.length || !isVisible(els[0]); },
     exists: function (refs) { return resolve(refs).length > 0; },
@@ -152,7 +228,7 @@ export function pageOpsSource(): string {
       return (0, eval)("(" + expr + ")");
     },
   };
-  window.__keveOpsSource = "v1";
+  window.__keveOpsSource = "v7";
   return "ok";
 })()`;
 }

@@ -70,7 +70,7 @@ export class CypressEngine implements EngineAdapter {
    */
   private async ensureReady(): Promise<void> {
     const has = await this.cdp.evaluateInAut<boolean>(
-      'Boolean(window.__keveOpsSource === "v1" && window.__keveNetLogSource === "v1" && window.__keveLocatorSource === "v1")',
+      'Boolean(window.__keveOpsSource === "v7" && window.__keveNetLogSource === "v1" && window.__keveLocatorSource === "v5")',
     ).catch(() => false);
     if (has) return;
     const { locatorSource } = await import('../dsl/locatorSource.js');
@@ -191,12 +191,16 @@ export class CypressEngine implements EngineAdapter {
 
   async click(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const r = normalizeRefs(refs);
-    await this.withWait(() => this.opsCall('click', r, false));
+    // 默认 10s 重试窗口在 wujie 微前端嵌套页面下不够：实测弹层级联渲染（cascader
+    // menu 等）可能被主线程长任务挤到 10s 外才出现，click 命中前的定位重试因此
+    // 提前耗尽，fn 抛错掉进 Agent Re-Act 并在 120s 后被判 blocked（参见 S699
+    // 线上用例排查，task-local-699-*）。这里放宽到 20s，只影响 click/dblClick。
+    await this.withWait(() => this.opsCall('click', r, false), 20000);
   }
 
   async dblClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const r = normalizeRefs(refs);
-    await this.withWait(() => this.opsCall('click', r, true));
+    await this.withWait(() => this.opsCall('click', r, true), 20000);
   }
 
   /** 强制点击：CDP 下没有 actionability 检查，语义等同于 click */
@@ -355,6 +359,23 @@ export class CypressEngine implements EngineAdapter {
       const actual = await this.opsCall<string>('text', r);
       if (actual === String(expected).replace(/\s+/g, ' ').trim()) {
         throw new Error(`断言失败：元素文本不应等于「${expected}」，实际为「${actual}」`);
+      }
+    });
+  }
+
+  /**
+   * 表单元素当前值断言（input/textarea/select 的 value）。
+   *
+   * 与 expectTextEquals 的区别是取值口径：input 的 textContent 恒为空，
+   * 用文本断言校验用户输入会永远失败；这里读 DOM value，才是「输入框里
+   * 确实有这个值」的证据。
+   */
+  async expectValue(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+    const r = normalizeRefs(refs);
+    await this.withWait(async () => {
+      const actual = await this.opsCall<string>('value', r);
+      if (actual !== String(expected)) {
+        throw new Error(`断言失败：元素值应等于「${expected}」，实际为「${actual}」`);
       }
     });
   }

@@ -289,7 +289,7 @@ export function createCdp(send: CdpSend) {
 
   async function ensureLocator(): Promise<void> {
     const ok = await evaluateInAut<boolean>(
-      'Boolean(window.__keveLocator && window.__keveLocatorSource === "v1")',
+      'Boolean(window.__keveLocator && window.__keveLocatorSource === "v5")',
     );
     if (!ok) {
       const { locatorSource } = await import('../dsl/locatorSource.js');

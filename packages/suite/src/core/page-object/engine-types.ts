@@ -93,6 +93,9 @@ export interface EngineAdapter {
   expectTextEquals(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 断言：元素文本不等于（平台 EXPECTED_VALUE ctype=text cexpression=not.eq） */
   expectTextNotEquals(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
+  /** 断言：表单元素当前值等于（input/textarea/select 的 value，而非文本内容）。
+   *  与 expectTextEquals 的区别：后者读的是元素文本，对 input 取不到用户输入的值。 */
+  expectValue(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 断言：元素数量 */
   expectCount(count: number, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 断言：元素集合中「文本非空」的个数（平台 EXPECTED_VALUE ctype=index，历史语义为计数） */

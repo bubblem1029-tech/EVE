@@ -30,7 +30,8 @@ function hopToCss(t: string, v: string): string {
  * - selector → locator(css)
  * - class    → locator('.a.b')
  * - includes/text → locator('text=...')（在当前范围内找包含该文本的元素）
- * - label    → getByLabel（表单控件按可见标签定位，平台 label hop 37 处）
+ * - label    → 平台历史 DSL 的 label 是 HTML 标签选择器（tbody/tr/div 等），
+ *             现代表单「按可见 label 找控件」语义只在取值看起来不是标签名时兜底
  * - iframe-url    → frameLocator（进入 iframe 上下文，src 部分匹配）
  * - javascript/source → 跳过（javascript 仅 WRITE_GLOBAL 场景由 engine.evaluate 处理）
  *
@@ -63,10 +64,25 @@ function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: Eleme
       // 且与老行为（点中文本所在叶子）兼容。
       cur = cur.locator('text=' + text.replace(/\\/g, '\\\\').replace(/"/g, '\\"'));
     } else if (t === 'label') {
-      // 表单控件按可见标签定位（平台 label hop）。Playwright getByLabel 在
-      // Locator/FrameLocator 上同样可用，语义与「找 label 文本对应的输入控件」一致。
+      // 平台历史 DSL 的 label 是 HTML 标签选择器：tbody → locator('tbody')。
+      // 若值不是标签名（如“用户名/确定”），保留按可见 label 找控件语义，避免
+      // 历史或新 DSL 里依赖 label 文本的定位直接失效。
       const label = String(v).trim();
-      cur = cur.getByLabel(label, { exact: false });
+      const tagRe = /^[A-Za-z][A-Za-z0-9-]*$/;
+      const knownTag = tagRe.test(label) && [
+        'a', 'abbr', 'address', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo',
+        'blockquote', 'body', 'br', 'button', 'canvas', 'caption', 'cite', 'code', 'col',
+        'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl',
+        'dt', 'em', 'embed', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1',
+        'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup', 'hr', 'html', 'i', 'iframe',
+        'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark',
+        'menu', 'meta', 'meter', 'nav', 'noscript', 'object', 'ol', 'optgroup', 'option',
+        'output', 'p', 'picture', 'pre', 'progress', 'q', 'rp', 'rt', 'ruby', 's', 'samp',
+        'script', 'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style',
+        'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th',
+        'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
+      ].includes(label.toLowerCase());
+      cur = knownTag ? cur.locator(label) : cur.getByLabel(label, { exact: false });
     } else {
       throw new Error(`Unknown hop type '${t}' in chain: ${JSON.stringify(hop)}`);
     }
