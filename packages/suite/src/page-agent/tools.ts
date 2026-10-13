@@ -169,7 +169,9 @@ tools.set('done', tool({
     execute: async function (this: KevePageAgent, input) {
         const icons: Record<string, string> = { pass: '✅', fail: '❌', blocked: '🚫' };
         let verdict = input.verdict as string | undefined;
-        // 强制校验：verdict 缺失或非法时从 text 推断（MacroTool 扁平化导致 verdict 变 optional）
+        // 强制校验：verdict 缺失或非法时从 text 推断（MacroTool 扁平化导致 verdict 变 optional）。
+        // verdict 与可推断文本都缺失时不能默认 pass —— Agent 已把动作做完但没给出结论，
+        // 交给上层按保守语义判定，而不是在工具层制造假绿。
         if (!icons[verdict as string]) {
             console.warn(`[done] ⚠️ verdict missing or invalid ("${input.verdict}"), inferring from text`);
             const t = String(input.text || '').toLowerCase();
@@ -177,8 +179,10 @@ tools.set('done', tool({
                 verdict = 'fail';
             } else if (t.includes('blocked') || t.includes('阻塞') || t.includes('阻止')) {
                 verdict = 'blocked';
-            } else {
+            } else if (t.length > 0) {
                 verdict = 'pass'; // 有 text 且无否定词 → 默认 pass
+            } else {
+                throw new Error('done 缺少 verdict 且没有可推断的 text，不能默认判定通过');
             }
         }
         return `${icons[verdict]} Task ${verdict}: ${input.text}`;

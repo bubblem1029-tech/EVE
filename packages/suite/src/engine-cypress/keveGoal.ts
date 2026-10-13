@@ -85,10 +85,137 @@ function logLine(line: string): void {
   addLog(line);
 }
 
+/**
+ * Cypress 命令面板里的一个 keveGoal 步骤条目。
+ *
+ * 新链路整条用例跑在 `cy.then(async () => …)` 内、内部零 cy 命令，
+ * 命令面板因此只剩网络请求，执行中无法判断进度。这里用 `Cypress.log()`
+ * 为每个 goal 手动投影一行「步骤N：xxx」，恢复旧链路的面板可读性。
+ *
+ * 面板投影是纯可观测性增强：任何一步失败都只降级告警，绝不改变用例结论。
+ */
+interface CyPanelLog {
+  set(key: string, value: any): void;
+  get(key: string): any;
+  error(err: Error): void;
+  end(): void;
+}
+
+function openGoalPanelLog(order: number, step: string): CyPanelLog | null {
+  // keveGoal 同源实现也被非 Cypress 宿主引用，必须显式探测运行时能力。
+  const cypress = (globalThis as any).Cypress;
+  if (typeof cypress?.log !== 'function') return null;
+  try {
+    return cypress.log({
+      name: 'keveGoal',
+      // order 从 0 起算，展示与旧链路一致从「步骤1」开始。
+      displayName: `步骤${order + 1}`,
+      message: step,
+    }) || null;
+  } catch (err: any) {
+    console.warn(`[keveGoal] 步骤面板日志创建失败（不影响执行）：${err?.message || err}`);
+    return null;
+  }
+}
+
+function closeGoalPanelLog(log: CyPanelLog | null, success: boolean, errorMessage?: string): void {
+  if (!log) return;
+  try {
+    // 失败态必须走 log.error()：实测 set('state','failed') 会被 end() 重置回 passed。
+    // 成功态不手写 ✅/❌，交给 Cypress 原生状态染色。
+    if (!success) log.error(new Error(errorMessage || 'keveGoal failed'));
+    log.end();
+  } catch (err: any) {
+    console.warn(`[keveGoal] 步骤面板日志收敛失败（不影响执行）：${err?.message || err}`);
+  }
+}
+
+/**
+ * 面板单行承载有限：长错误折叠空白并截断，避免一次失败把后续步骤刷出视口。
+ *
+ * 折叠空白是必须的 —— 面板实测会把 message 里的 `\n` 折叠成空格，
+ * 这里显式做一遍，保证 stdout / 报告 / 面板三处文本一致。
+ */
+function clip(text: string, max = 220): string {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+interface GoalFailureInput {
+  fnError?: string;
+  fnBlocked: boolean;
+  shotDiff: boolean;
+  /** fn 抛的是确定性断言（isAssertionFailure），而非定位/运行时错误 */
+  assertion: boolean;
+  /** fn 断言失败但 Agent 判了 pass，被确定性规则覆盖 */
+  overriddenByFn: boolean;
+  /** Agent 自己写的收尾结论（done 动作的 text） */
+  agentText?: string;
+}
+
+/**
+ * 把失败归因拆成「实际」与「判定」两段，供面板详情行与 errorMessage 复用。
+ *
+ * 面板实测限制（见方案文档第十节）：
+ *  - message 里的 `\n` 会被折叠成空格 → 多字段必须用显式分隔符连接；
+ *  - `consoleProps` 不会展开、点击也不渲染 → 信息必须直接可见，不能藏起来。
+ * 因此这里只产出可直接铺在面板上的单段文本，不做多行排版。
+ */
+function describeGoalFailure(input: GoalFailureInput): { actual: string; verdict: string } {
+  const actual = input.fnBlocked
+    ? `环境阻断 — ${clip(input.fnError || '未知环境错误')}`
+    : input.shotDiff
+      ? `截图差异超阈值 — ${clip(input.fnError || '未知差异')}`
+      : input.fnError
+        ? `${input.assertion ? 'fn 断言未通过' : 'fn 执行报错'} — ${clip(input.fnError)}`
+        : 'Agent Re-Act 结束后仍未达到预期';
+
+  const judge = input.fnBlocked
+    ? 'blocked · 环境错误，跳过 Agent Re-Act'
+    : input.overriddenByFn
+      ? 'fail · fn 断言覆盖 Agent 的 PASS'
+      : input.fnError
+        ? input.assertion
+          ? 'fail · fn 断言未通过'
+          : 'fail · fn 报错后 Agent 仍未达成'
+        : 'fail · Agent Re-Act 未达成预期';
+
+  // 用「自述」而非「结论」：Agent 判 pass 却因 fn 断言被判 fail 时，
+  // 这句话与最终判定可能相反，如实呈现才能暴露冲突，而不是掩盖它。
+  const verdict = input.agentText
+    ? `${judge}（Agent 自述：${clip(input.agentText, 120)}）`
+    : judge;
+
+  return { actual, verdict };
+}
+
+/**
+ * 失败步骤在红色主行之后追加一条详情行。
+ *
+ * 独立成条而非塞进主行 message：实测详情条不继承红色，天然是「详情位」的
+ * 视觉层次，且主行保持「步骤N + 动作」的整洁形态，长文案不会污染步骤列表。
+ */
+function appendGoalFailurePanelLine(order: number, detail: string): void {
+  const cypress = (globalThis as any).Cypress;
+  if (typeof cypress?.log !== 'function') return;
+  try {
+    cypress.log({
+      name: 'keveGoal',
+      displayName: `↳ 步骤${order + 1} 失败原因`,
+      // 不重复步骤文案：主行已显示「步骤N + 动作」，displayName 也带了步骤号，
+      // 详情行只承载「期望 / 实际 / 判定」三段，避免同样的信息占两倍行高。
+      message: detail,
+    });
+  } catch (err: any) {
+    console.warn(`[keveGoal] 步骤面板失败详情写入失败（不影响执行）：${err?.message || err}`);
+  }
+}
+
 export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
   return async (options, fn) => {
     const state = requireTestState();
     const order = nextGoalOrder();
+    const panelLog = openGoalPanelLog(order, options.step);
     const goalMeta: KeveGoalMeta = {
       precondition: options.precondition,
       step: options.step,
@@ -242,27 +369,53 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     }
 
     // ── 确定性覆盖：fn 断言失败不允许被 Agent 判成 pass ──
+    // 覆盖发生在此处，事后无法从 reactResult 反推（conclusion 已被改写），
+    // 因此就地留痕，供面板与 errorMessage 说明「为什么和 Agent 的结论相反」。
+    let overriddenByFn = false;
     if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError)) {
       console.log(`[keveGoal] ⚠️ "${options.step}" Agent 判 PASS 但 fn 断言失败 — 覆盖为 FAIL`);
       reactResult.expectedMet = false;
       reactResult.conclusion = 'fail';
+      overriddenByFn = true;
     }
 
     const conclusion = reactResult.expectedMet ? 'pass' : (reactResult.conclusion || 'fail');
     const success = reactResult.expectedMet;
+
+    // 失败归因必须自带上下文：只报「哪一步 / 为什么」其中的一半，都要回查报告
+    // 才能定位。这里把第几步、步骤文案、fn 真实异常、Agent 判定理由一并带上。
+    const agentText = (reactResult.actions || [])
+      .filter((a: any) => a.action?.tool === 'done')
+      .pop()?.action?.text;
+    const failure = describeGoalFailure({
+      fnError,
+      fnBlocked,
+      shotDiff: fnErrorRaw?.name === 'ScreenshotDiffError',
+      assertion: Boolean(fnError && isAssertionFailure(fnError)),
+      overriddenByFn,
+      agentText,
+    });
+    const failureDetail = `期望:${clip(options.expected, 160)} ｜ 实际:${failure.actual} ｜ 判定:${failure.verdict}`;
+
     const errorMessage = success
       ? undefined
       : conclusion === 'blocked'
-        ? `Blocked: ${fnBlocked ? fnError : (reactResult.actions || []).filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked'}`
+        ? `Blocked: [步骤${order + 1} ${options.step}] ${fnBlocked ? fnError : agentText || 'Agent blocked'}`
         : fnErrorRaw?.name === 'ScreenshotDiffError'
-          ? fnError
+          ? `[步骤${order + 1} ${options.step}] ${fnError}`
           : fnError && isAssertionFailure(fnError)
-            ? `Assertion failed: ${fnError}`
-            : `Expected not achieved: ${options.expected}`;
+            ? `Assertion failed: [步骤${order + 1} ${options.step}] ${fnError}`
+            : `Expected not achieved: [步骤${order + 1} ${options.step}] ${options.expected} — ${failure.actual}`;
     // 与 Playwright keve-test.ts 的终局日志同形，保证两端执行轨迹可逐行对照
     logLine(success
       ? `[keveGoal] ✅ "${options.step}" PASSED`
       : `[keveGoal] ❌ "${options.step}" FAILED (${conclusion}) — ${errorMessage}`);
+    closeGoalPanelLog(panelLog, success, errorMessage);
+    if (!success) {
+      // 主行红条 + 独立详情行：面板上不点开任何东西就能回答
+      // 第几步 / 期望什么 / 实际发生什么 / 谁判的。
+      appendGoalFailurePanelLine(order, failureDetail);
+    }
 
     // ── goal-after：优先取 agent done 时刻的截图，否则用 fn-after ──
     let goalScreenshotAfter = '';

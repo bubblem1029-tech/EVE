@@ -197,14 +197,25 @@ export function createCdp(send: CdpSend) {
   async function goto(url: string, timeout = 30000): Promise<void> {
     const before = await currentUrl();
     await evaluateInAut(`location.href = ${JSON.stringify(url)}`);
-    const landed = await pollUntil(async () => {
+    const waitComplete = async () => {
       const snap = await snapshot();
       if (snap.readyState !== 'complete') return undefined;
       if (snap.url === before && snap.url !== url) return undefined;
       // 同 URL 的显式 re-goto 场景：URL 不变时直接以 readyState 为准
       return snap;
-    }, timeout);
-    if (!landed) {
+    };
+    const landed = await pollUntil(waitComplete, timeout);
+    if (landed) return;
+
+    // 页面存在长连接时 document.readyState 可能一直停在 interactive，
+    // 但新文档实际已经可交互且 URL 已切到目标。此时不能再判导航超时。
+    const interactive = await pollUntil(async () => {
+      const snap = await snapshot();
+      if (snap.readyState === 'loading' || snap.readyState === 'uninitialized') return undefined;
+      if (snap.url !== url) return undefined;
+      return snap;
+    }, 5000);
+    if (!interactive) {
       throw new Error(`[cypress-engine] 导航超时（${timeout}ms）：${url}`);
     }
   }

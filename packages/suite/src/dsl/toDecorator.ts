@@ -270,7 +270,16 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
     const executableLineCount = [...body, ...expLines].length;
     // P1 纵深防御：断言里若残留未解析占位符，说明解析链路有漏（正常已在
     // stringExpr 处编译期报错），一律不许短路 —— 自证式断言不能当作确定性事实。
-    const hasUnresolved = [...body, ...expLines].some((b) => /\$\{[^}]+\}/.test(b));
+    // stringExpr 对已知合法引用生成 ${String(X)} 模板，运行时变量在这里不是
+    // 「未解析占位符」，不应阻断确定性短路。其余残留 ${...} 仍是解析漏洞。
+    const hasUnresolved = [...body, ...expLines].some((b) => {
+      for (const m of String(b).matchAll(/\$\{([^}]+)\}/g)) {
+        const raw = String(m[1]).trim();
+        const name = /^String\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)$/.exec(raw)?.[1] || raw;
+        if (!ctx.runtimeVars.has(name)) return true;
+      }
+      return false;
+    });
     const deterministic =
       expectedFullyCovered && !pageLevelOp && executableLineCount > 0 && !hasUnresolved;
     out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${deterministic ? ', deterministic: true' : ''} }, async () => {`);
@@ -289,7 +298,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
         body.push(
           `throw new Error(${q(
             `OPEN_PAGE 无法解析有效 URL（步骤文案「${stepText}」，value=${JSON.stringify(d.value)}）`
-              + ' —— 该步骤未配置页面变量，且文案未能匹配到变量表中的页面模板',
+            + ' —— 该步骤未配置页面变量，且文案未能匹配到变量表中的页面模板',
           )});`,
         );
       }
@@ -394,7 +403,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
           : undefined);
       const targetCtx = valueCtx || d.child?.context || d.child;
       if (Array.isArray(targetCtx) && targetCtx.length) {
-        emit([`await engine.drag(${chain}, ${chainExpr(targetCtx, ctx)});`, ...waitExprs(d)]);
+        emit([`await engine.drag(${chainExpr(normalizeDragSource(d.context), ctx)}, ${chainExpr(targetCtx, ctx)});`, ...waitExprs(d)]);
       } else {
         throw new Error(`DRAGGING 缺少目标元素，拒绝退化为悬停: ${stepText}`);
       }
@@ -481,7 +490,7 @@ function renderOpenPageWithGates(d: DslStep, gates: DslStep[], ctx: RenderCtx): 
     body.push(
       `throw new Error(${q(
         `OPEN_PAGE 无法解析有效 URL（步骤文案「${stepText}」，value=${JSON.stringify(d.value)}）`
-          + ' —— 该步骤未配置页面变量，且文案未能匹配到变量表中的页面模板',
+        + ' —— 该步骤未配置页面变量，且文案未能匹配到变量表中的页面模板',
       )});`,
     );
   } else {
@@ -896,8 +905,8 @@ function stringExpr(raw: string, ctx: RenderCtx, where: string, stepValue?: DslV
     if (ctx.runtimeVars.has(name)) continue;
     throw new Error(
       `未解析的变量引用 \${${name}}（${where}）—— 该名称既不在变量表中，`
-        + '也不由本场景内的 WRITE_GLOBAL 写入。跨场景引用不会自动传递，'
-        + '请让用例自包含（在变量表配置该名称，或在本场景内先 WRITE_GLOBAL 写入）',
+      + '也不由本场景内的 WRITE_GLOBAL 写入。跨场景引用不会自动传递，'
+      + '请让用例自包含（在变量表配置该名称，或在本场景内先 WRITE_GLOBAL 写入）',
     );
   }
   if (!refs.length) return q(interpolated);
@@ -946,7 +955,7 @@ function codeLiteral(s: string, where: string): string {
   if (refs.length) {
     throw new Error(
       `未解析的变量引用 \${${refs[0]}}（${where}）—— 该名称不在变量表中，`
-        + '也不是本场景 WRITE_GLOBAL 可写入的位置（仅 INPUT_ELEMENT 等值的来源支持运行时变量）',
+      + '也不是本场景 WRITE_GLOBAL 可写入的位置（仅 INPUT_ELEMENT 等值的来源支持运行时变量）',
     );
   }
   return q(String(s ?? ''));
@@ -1197,7 +1206,7 @@ function collectHops(context: DslHop[] | undefined): CollectedHop[] {
     if (type === 'source') {
       throw new Error(
         `定位链里的元素库引用（type=source, value=${value}）未被解析成 locator`
-          + ' —— 装载器需要先把 source 跳展开成 selector/class 跳再交给生成器',
+        + ' —— 装载器需要先把 source 跳展开成 selector/class 跳再交给生成器',
       );
     }
     if (type === 'javascript') continue; // 仅 WRITE_GLOBAL 用，不参与元素定位
@@ -1207,6 +1216,22 @@ function collectHops(context: DslHop[] | undefined): CollectedHop[] {
     out.push(hasIdx ? { type, value, index: Number(idx) } : { type, value });
   }
   return out;
+}
+
+/**
+ * 拖拽源链归一化：录制器常见的「父容器 → 文本 → 列表项」链会把列表项限制在
+ * 文本叶节点后代内，导致确定性定位落空。同用例里可稳定命中的点击链是
+ * 「列表项 → 文本/includes」，拖拽源也应优先使用该形态。
+ */
+function normalizeDragSource(context: DslHop[] | undefined): DslHop[] | undefined {
+  const hops = Array.isArray(context) ? context : [];
+  if (hops.length < 2) return context;
+  const prev = hops[hops.length - 2];
+  const tail = hops[hops.length - 1];
+  const isListItemTail = String(tail?.value ?? '') === '[data-e2e-name="列表项"]';
+  const isTextHop = String(prev?.type || '') === 'includes' || String(prev?.type || '') === 'text';
+  if (isListItemTail && isTextHop) return [tail, prev];
+  return context;
 }
 
 /** 截图基线 key 兜底：步骤文案 → 稳定 key（同步骤重复生成不变） */
