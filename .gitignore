@@ -17,6 +17,7 @@ pnpm-lock.yaml
 .tmp-cyprobe/
 .tmp-cyprobe2/
 .tmp-frameprobe/
+.tmp-navprobe/
 
 # suite 测试执行临时目录与报告产物
 **/.tmp-cyneg/

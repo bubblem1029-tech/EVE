@@ -18,6 +18,7 @@
 
 import { LLM, type Message, type ContentItem, type Tool } from '@kkeve/core/llm';
 import { z } from 'zod';
+import { inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
 import { /* scriptRefine, */ extractDiagnosticHints } from './hooks.js';
 import { packMacroToolSchema, tools, getZodShape, type MacroToolInput, type ToolContext } from './tools.js';
 import type { AgentInitialImageLoader, AgentPage, AgentScreenshotSaver } from './page-like.js';
@@ -625,25 +626,8 @@ export class KevePageAgent {
                                 conclusion = actionInput.success ? 'pass' : 'fail';
                             } else {
                                 // Level 4: parse text for verdict keyword (LLM often puts verdict in text)
-                                // Use includes (not exact match) — text may be a long description
-                                // IMPORTANT: Check fail/blocked BEFORE pass to avoid "不通过" hitting "通过"
-                                const textVal = String(actionInput?.text || '').trim().toLowerCase();
-                                if (textVal.includes('fail') || textVal.includes('failure')
-                                    || textVal.includes('失败') || textVal.includes('未通过') || textVal.includes('不通过')) {
-                                    conclusion = 'fail';
-                                } else if (textVal.includes('blocked') || textVal.includes('阻塞') || textVal.includes('阻止')) {
-                                    conclusion = 'blocked';
-                                } else if (textVal.includes('pass') || textVal.includes('success') || textVal.includes('ok')
-                                    || textVal.includes('完成') || textVal.includes('成功') || textVal.includes('通过')
-                                    || textVal.includes('验证通过') || textVal.includes('符合预期') || textVal.includes('一致')
-                                    || textVal.includes('匹配') || textVal.includes('确认') || textVal.includes('正确')
-                                    || textVal.includes('无误') || textVal.includes('生效')) {
-                                    conclusion = 'pass';
-                                } else {
-                                    // text 非空且无否定词 → LLM 写了一段验证结论，大概率是正面
-                                    // text 为空 → 保守判 fail
-                                    conclusion = textVal.length > 0 ? 'pass' : 'fail';
-                                }
+                                conclusion = inferConclusionFromDoneText(actionInput?.text)
+                                    || (String(actionInput?.text || '').trim() ? 'pass' : 'fail');
                             }
                         }
                         const data = String(actionInput?.text || { pass: 'Goal achieved', fail: 'Expected not achieved', blocked: 'Blocked' }[conclusion]);

@@ -108,8 +108,35 @@ export function isAssertionFailure(error: string): boolean {
  * 推导 done action 的三态结论（pass/fail/blocked）。
  *
  * 4 级回退：step 级 conclusion → action.verdict → action.result → action.success / 文本关键词。
- * 文本匹配必须先判 fail/blocked 再判 pass，否则「不通过」会被「通过」命中。
+ *
+ * 文本回退只看结论区（首行 + 末尾两行），刻意忽略中间的过程叙述。
+ * 否则 Agent 在正文里写「初始尝试失败，最终成功」时，任何一条过程失败
+ * 关键词都会把整步误判成 fail，出现“自述成功但 expectedMet=false”的矛盾。
  */
+const STRONG_FAIL_PATTERN = /失败|不通过|未通过|未满足|未完成|无法完成|未能完成|没有成功|未成功|未实现|未达到|未达成|任务未通过|测试未通过|assertionerror|assertion fail|expected not met|did not achieve|did not complete|did not pass|\bfail(?:ed|ure|s)?\b|not achieved/i;
+
+/**
+ * 从 done.text 结论区推导三态结论。
+ * 只处理「漏填 verdict / result / success」时的保守兜底，不替代显式判定。
+ */
+export function inferConclusionFromDoneText(text: unknown): 'pass' | 'fail' | 'blocked' | undefined {
+  const raw = String(text || '').trim();
+  if (!raw) return undefined;
+
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const head = lines[0] || '';
+  const tail = lines.slice(-2).join(' ');
+  const conclusionZone = `${head} ${tail}`;
+
+  const lowerZone = conclusionZone.toLowerCase();
+  const blocked = lowerZone.includes('blocked') || conclusionZone.includes('阻塞')
+    || conclusionZone.includes('阻止') || conclusionZone.includes('权限不足')
+    || conclusionZone.includes('无权限') || conclusionZone.includes('无访问');
+  if (blocked) return 'blocked';
+  if (STRONG_FAIL_PATTERN.test(conclusionZone)) return 'fail';
+  return 'pass';
+}
+
 export function deriveActionConclusion(
   stepConclusion: string | undefined,
   action: any,
@@ -124,11 +151,5 @@ export function deriveActionConclusion(
   if (raw === 'pass' || raw === 'fail' || raw === 'blocked') return raw;
   if (typeof action?.success === 'boolean') return action.success ? 'pass' : 'fail';
 
-  const tv = String(action?.text || '').trim().toLowerCase();
-  if (tv.includes('fail') || tv.includes('failure')
-    || tv.includes('失败') || tv.includes('未通过') || tv.includes('不通过')) return 'fail';
-  if (tv.includes('blocked') || tv.includes('阻塞') || tv.includes('阻止')) return 'blocked';
-  if (tv.includes('pass') || tv.includes('success') || tv.includes('ok')
-    || tv.includes('完成') || tv.includes('成功') || tv.includes('通过') || tv.includes('验证通过')) return 'pass';
-  return undefined;
+  return inferConclusionFromDoneText(action?.text);
 }

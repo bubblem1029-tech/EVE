@@ -37,7 +37,7 @@ import * as path from 'node:path';
 // 这里只负责在启动浏览器前把 storageState 就位（global-setup 已写好文件）。
 import { resolveStorageStatePath, writeStorageState, readInjectedCookies } from './global-setup.js';
 import { beginGoalShotDiffCapture, drainGoalShotDiff, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
-import { isAssertionFailure, isEnvironmentBlockedError } from '../core/judge/goal-heuristics.js';
+import { isAssertionFailure, isEnvironmentBlockedError, inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
 
 export { expect };
 export { keveModel, keveScene, getModelScenes } from '../core/decorator/keve-decorators.js';
@@ -449,14 +449,8 @@ export const test = base.extend<KeveFixture>({
                   if (raw === 'pass' || raw === 'fail' || raw === 'blocked') actionConclusion = raw;
                   else if (typeof a.action?.success === 'boolean') actionConclusion = a.action.success ? 'pass' : 'fail';
                   else {
-                    // Level 4: parse text for verdict keyword (includes match, not exact)
-                    // IMPORTANT: Check fail/blocked BEFORE pass to avoid "不通过" hitting "通过"
-                    const tv = String(a.action?.text || '').trim().toLowerCase();
-                    if (tv.includes('fail') || tv.includes('failure')
-                      || tv.includes('失败') || tv.includes('未通过') || tv.includes('不通过')) actionConclusion = 'fail';
-                    else if (tv.includes('blocked') || tv.includes('阻塞') || tv.includes('阻止')) actionConclusion = 'blocked';
-                    else if (tv.includes('pass') || tv.includes('success') || tv.includes('ok')
-                      || tv.includes('完成') || tv.includes('成功') || tv.includes('通过') || tv.includes('验证通过')) actionConclusion = 'pass';
+                    const inferred = inferConclusionFromDoneText(a.action?.text);
+                    actionConclusion = inferred || (String(a.action?.text || '').trim() ? 'pass' : 'fail');
                   }
                 }
               }

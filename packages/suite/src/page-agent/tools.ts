@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod';
+import { inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
 import type { KevePageAgent } from './agent.js';
 
 // ─── Tool Definition ──────────────────────────────────────────────────
@@ -174,14 +175,8 @@ tools.set('done', tool({
         // 交给上层按保守语义判定，而不是在工具层制造假绿。
         if (!icons[verdict as string]) {
             console.warn(`[done] ⚠️ verdict missing or invalid ("${input.verdict}"), inferring from text`);
-            const t = String(input.text || '').toLowerCase();
-            if (t.includes('fail') || t.includes('failure') || t.includes('失败') || t.includes('不通过') || t.includes('未通过')) {
-                verdict = 'fail';
-            } else if (t.includes('blocked') || t.includes('阻塞') || t.includes('阻止')) {
-                verdict = 'blocked';
-            } else if (t.length > 0) {
-                verdict = 'pass'; // 有 text 且无否定词 → 默认 pass
-            } else {
+            verdict = inferConclusionFromDoneText(input.text);
+            if (!verdict) {
                 throw new Error('done 缺少 verdict 且没有可推断的 text，不能默认判定通过');
             }
         }
@@ -1224,7 +1219,8 @@ export function packMacroToolSchema() {
             if (!fieldMap.has(key)) {
                 // First encounter — store the schema and add tool names to description
                 const zodField = val as z.ZodTypeAny;
-                const desc = (zodField as any)._def?.description || '';
+                // zod v4 把 description 存在实例属性上，_def 里没有；v3 则在 _def。
+                const desc = (zodField as any)?.description || (zodField as any)?._def?.description || '';
                 fieldMap.set(key, { schema: zodField.optional(), description: desc });
             }
             // If field already exists, just ensure description mentions both tools

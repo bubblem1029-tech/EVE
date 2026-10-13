@@ -98,8 +98,11 @@ export function buildExecEnv({
     KEVE_ENV: input.env || 'test',
     KEVE_TARGET_URL: input.targetUrl || '',
     KEVE_STORAGE_STATE: path.join(taskDir, '.auth', 'storage-state.json'),
-    KEVE_SSO_COOKIES: input.ssoCookiesJson || '[]',
-    KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {}),
+    // 任务入参优先，环境变量仅作为本地调试兜底，避免父进程残留登录态覆盖任务账号。
+    KEVE_SSO_COOKIES: input.ssoCookiesJson || process.env.KEVE_SSO_COOKIES || '[]',
+    KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {})
+      || process.env.KEVE_IDENTITY_SSO_COOKIES
+      || '{}',
     KEVE_LLM_BASE_URL: input.llm?.baseUrl || process.env.KEVE_LLM_BASE_URL || '',
     KEVE_LLM_MODEL_NAME: input.llm?.model || process.env.KEVE_LLM_MODEL_NAME || '',
     KEVE_LLM_API_KEY: input.llm?.apiKey || process.env.KEVE_LLM_API_KEY || '',

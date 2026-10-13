@@ -191,33 +191,92 @@ export function createCdp(send: CdpSend) {
 
   /**
    * 导航到目标 URL。
-   * 必须「先等 URL 变化、再等 readyState=complete」—— 探针里先把旧页面的
-   * readyState=complete 当成导航完成过，导致后续断言跑在旧页面上。
+   *
+   * 就绪判定不看 URL，而是看 `performance.timeOrigin` 是否变化：
+   *   1. 目标站常把 `/` 客户端重定向到 `/projects`（含尾斜杠、hash 差异），
+   *      用 `snap.url === url` 判定会让已渲染的页面被误报成导航超时；
+   *   2. `timeOrigin` 每次新文档导航都会变，而 SPA 的 pushState/replaceState
+   *      不改它，因此既能确认「真的换了文档」，又不会被路由重写干扰；
+   *   3. 旧的 `screenshot-before` 误把旧页面 complete 当导航完成的问题也一并规避。
+   *
+   * 新文档就绪后 readyState 非 loading 即视为可交互：部分长连接页面会长期停在
+   * interactive，不再进入 complete。
    */
   async function goto(url: string, timeout = 30000): Promise<void> {
-    const before = await currentUrl();
+    const beforeUrl = await currentUrl();
+    // 基线读不到时用 null 表示「未知」，绝不用 0 兜底 —— 后者会让后续任意一次
+    // 成功读数都被判成「换过文档」，等于把旧文档放行。
+    const beforeTimeOrigin = await evaluateInAut<number>(
+      'Number(performance.timeOrigin || 0)',
+    ).catch(() => null);
     await evaluateInAut(`location.href = ${JSON.stringify(url)}`);
-    const waitComplete = async () => {
-      const snap = await snapshot();
-      if (snap.readyState !== 'complete') return undefined;
-      if (snap.url === before && snap.url !== url) return undefined;
-      // 同 URL 的显式 re-goto 场景：URL 不变时直接以 readyState 为准
-      return snap;
-    };
-    const landed = await pollUntil(waitComplete, timeout);
-    if (landed) return;
 
-    // 页面存在长连接时 document.readyState 可能一直停在 interactive，
-    // 但新文档实际已经可交互且 URL 已切到目标。此时不能再判导航超时。
-    const interactive = await pollUntil(async () => {
-      const snap = await snapshot();
-      if (snap.readyState === 'loading' || snap.readyState === 'uninitialized') return undefined;
-      if (snap.url !== url) return undefined;
-      return snap;
-    }, 5000);
-    if (!interactive) {
-      throw new Error(`[cypress-engine] 导航超时（${timeout}ms）：${url}`);
-    }
+    /** 仅 hash 不同 = 同文档内跳转，timeOrigin 不变，只能等 URL 收敛 */
+    const normalizeUrl = (raw: string): string => {
+      try {
+        const u = new URL(String(raw));
+        u.hash = '';
+        // 尾斜杠差异不代表换页，统一去掉再做比较。
+        return u.href.replace(/\/$/, '');
+      } catch {
+        return String(raw || '');
+      }
+    };
+    const readHash = (raw: string): string => {
+      try {
+        return new URL(String(raw)).hash;
+      } catch {
+        return '';
+      }
+    };
+    const hashOnly = (() => {
+      try {
+        const target = new URL(url);
+        return Boolean(target.hash) && normalizeUrl(beforeUrl) === normalizeUrl(url);
+      } catch {
+        return false;
+      }
+    })();
+
+    let lastSnapshot: AutSnapshot | null = null;
+    let lastProbeError = '';
+    const documentChanged = async (snap: AutSnapshot): Promise<boolean> => {
+      const origin = await evaluateInAut<number>(
+        'Number(performance.timeOrigin || 0)',
+      ).catch(() => null);
+      // 基线或当前值任一读不到时，退回「URL 确实变了」这一较弱但不会放行
+      // 旧文档的信号，避免把当前文档当成导航完成。
+      if (typeof origin !== 'number' || origin <= 0 || beforeTimeOrigin === null) {
+        return snap.url !== beforeUrl;
+      }
+      return origin !== beforeTimeOrigin;
+    };
+    const readLanded = async (requireComplete: boolean): Promise<AutSnapshot | undefined> => {
+      try {
+        const snap = await snapshot();
+        lastSnapshot = snap;
+        lastProbeError = '';
+        // hash 跳转不换文档：按规范化后的「同路径 + 目标 hash」判定收敛；
+        // 同址 re-goto 时首轮即命中属预期（页面本就在目标位置）。
+        const arrived = hashOnly
+          ? normalizeUrl(snap.url) === normalizeUrl(url) && readHash(snap.url) === readHash(url)
+          : await documentChanged(snap);
+        if (!arrived) return undefined;
+        if (requireComplete) return snap.readyState === 'complete' ? snap : undefined;
+        return snap.readyState === 'loading' || snap.readyState === 'uninitialized' ? undefined : snap;
+      } catch (err: any) {
+        lastProbeError = String(err?.message || err);
+        return undefined;
+      }
+    };
+
+    if (await pollUntil(() => readLanded(true), timeout)) return;
+    if (await pollUntil(() => readLanded(false), 5000)) return;
+
+    const detail = lastSnapshot
+      ? `最后状态 readyState=${lastSnapshot.readyState} url=${lastSnapshot.url}`
+      : `未读到新文档快照${lastProbeError ? `（${lastProbeError}）` : ''}`;
+    throw new Error(`[cypress-engine] 导航超时（${timeout}ms）：${url}；${detail}`);
   }
 
   /** 刷新当前 AUT 页面（在 AUT context 内 reload，绝不碰 runner） */
