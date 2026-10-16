@@ -236,8 +236,13 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
 
   // 页面级步骤例外：navigate / refresh 不抛错只证明「导航动作已下发」，不证明
   // 「目标页面真的渲染出来了」—— 403、登录跳转、空白页同样是成功返回。
-  // 「页面正常响应」是一份 fn 无法自证的独立事实，必须保留 Agent 评测。
-  const pageLevelOp = op === 'OPEN_PAGE' || op === 'REDIRECT_TO' || op === 'REFRESH_PAGE';
+  // 只有当该步骤仍只靠导航/刷新自身动作、没有显式元素或值断言时才保留 Agent 评测；
+  // 若 DSL 作者已为页面级步骤提供了可执行断言（例如紧跟的 WAIT_EVENTS 被合并进本步），
+  // 那该断言就是「页面渲染」的自证事实，允许走 deterministic 短路，避免本地/无
+  // LLM 配置时页面明明渲染成功却因 Agent 无判据而误判 fail。
+  const isPageLevelOp =
+    (op === 'OPEN_PAGE' || op === 'REDIRECT_TO' || op === 'REFRESH_PAGE')
+    ;
 
   // ── 输入类步骤的确定性补强 ──
   // INPUT_ELEMENT 若没有显式断言，平台存下来的 expected 只是「操作完成，页面正常响应」，
@@ -265,9 +270,11 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
     : expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
 
   const emit = (body: string[]) => {
+    // 页面级步骤例外只在没有任何可执行断言时生效；有断言时允许短路。
+    const executableLineCount = body.length + expLines.length;
+    const pageLevelOp = isPageLevelOp && executableLineCount === 0;
     // 短路条件：expected 已被 fn 完全覆盖，且 fn 里确实有可执行内容 ——
     // body 与断言都为空说明该步骤既无动作也无校验，不能凭「没报错」判通过。
-    const executableLineCount = [...body, ...expLines].length;
     // P1 纵深防御：断言里若残留未解析占位符，说明解析链路有漏（正常已在
     // stringExpr 处编译期报错），一律不许短路 —— 自证式断言不能当作确定性事实。
     // stringExpr 对已知合法引用生成 ${String(X)} 模板，运行时变量在这里不是
