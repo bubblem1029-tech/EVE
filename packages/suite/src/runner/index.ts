@@ -16,6 +16,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveBrowserCacheDir } from '../core/browserCache.js';
 import { toDecorator, stepExpectedText, type DslStep, type DslVariableRow } from '../dsl/index.js';
 
 export type ExecutionEngine = 'cypress' | 'playwright';
@@ -98,6 +99,7 @@ export function buildExecEnv({
     KEVE_ENV: input.env || 'test',
     KEVE_TARGET_URL: input.targetUrl || '',
     KEVE_STORAGE_STATE: path.join(taskDir, '.auth', 'storage-state.json'),
+    KEVE_BROWSER_CACHE_DIR: resolveBrowserCacheDir(),
     // 任务入参优先，环境变量仅作为本地调试兜底，避免父进程残留登录态覆盖任务账号。
     KEVE_SSO_COOKIES: input.ssoCookiesJson || process.env.KEVE_SSO_COOKIES || '[]',
     KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {})

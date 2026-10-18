@@ -31,6 +31,7 @@ import { learnedActions } from '../core/learned-actions.js';
 import { loadConfig } from '../config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { activeBrowserCacheDir } from '../core/browserCache.js';
 
 // ─── 登录态注入 ─────────────────────────────────────────────────────
 // 不再由测试侧启动浏览器 / CDP 接管。登录 cookie 由服务端解析后随环境变量下发，
@@ -109,9 +110,34 @@ export const test = base.extend<KeveFixture>({
   },
 
   browser: async ({ }, use, testInfo) => {
-    const browser = await chromium.launch(
-      testInfo.project?.use?.launchOptions as any || {},
-    );
+    const launchOptions = { ...(testInfo.project?.use?.launchOptions as any || {}) };
+    // 磁盘缓存：Playwright 每次执行都是新进程 + 新 context，默认只会用临时 profile，
+    // 静态资源（JS/CSS/字体）在每个任务里都要重新下载。指定固定 --disk-cache-dir 后，
+    // 缓存跨进程、跨 context 复用（HTTP 缓存与 context 隔离无关），第二次打开同一站点明显变快。
+    // 目录由 runner 统一解析（默认单一共享目录）；缓存总开关只由 KEVE_BROWSER_CACHE_ENABLED 控制。
+    const cacheDir = activeBrowserCacheDir();
+    if (cacheDir) {
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        // 缓存磁盘中可能含页面私有的响应内容，收紧为仅当前用户可读写执行，
+        // 避免其他本机用户读取缓存目录。
+        fs.chmodSync(cacheDir, 0o700);
+        const args = Array.isArray(launchOptions.args) ? [...launchOptions.args] : [];
+        if (!args.some((arg: unknown) => String(arg).startsWith('--disk-cache-dir'))) {
+          args.push(`--disk-cache-dir=${cacheDir}`);
+        }
+        // 与 eve-screenshot 的启动参数对齐：限制磁盘缓存上限，避免任务长期运行后缓存目录无限膨胀。
+        if (!args.some((arg: unknown) => String(arg).startsWith('--disk-cache-size'))) {
+          args.push('--disk-cache-size=524288000');
+        }
+        launchOptions.args = args;
+      } catch (err: any) {
+        // 缓存目录不可写时不影响用例执行，退化为无缓存
+        console.warn(`[keve-test] 磁盘缓存目录不可用(${cacheDir}): ${err?.message || err}`);
+      }
+    }
+    const browser = await chromium.launch(launchOptions);
+    console.log(`[keve-test] browser cache: ${cacheDir ? `enabled at ${cacheDir}` : 'disabled'}`);
     await use(browser);
     await browser.close();
   },

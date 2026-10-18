@@ -16,10 +16,140 @@
 
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { activeBrowserCacheDir } from '../core/browserCache.js';
 import { compareWithBaseline, createBaseline, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
 import { buildConfidenceRecord, sanitizeRecord, type AttachmentLike } from '../core/judge/confidence.js';
 import { generateReportData } from '../core/generateReport/reportData.js';
+
+// ─── 浏览器磁盘缓存跨运行复用 ───────────────────────────────────────────────
+
+/**
+ * Cypress 会把浏览器 profile 建在 `<browserDir>/run-<ppid>/`，并把 HTTP 缓存写进
+ * `<profile>/CypressCache`。该目录名每次运行都变，运行结束即被回收，因此浏览器缓存
+ * 天然无法跨运行复用 —— 每次任务都要重新下载全部静态资源。
+ *
+ * 更麻烦的是：Cypress 会在 `before:browser:launch` 之后追加自己的
+ * `--user-data-dir` / `--disk-cache-dir`，重复参数以后者为准，所以在插件里注入启动
+ * 参数会被静默覆盖（实测确认）。
+ *
+ * 这里换成「目录搬运」：启动前把稳定缓存回灌到本轮 profile，运行结束再归档回去。
+ * profile 名里的 pid 是**插件进程的父进程 pid**（实测：插件 pid=11179 对应 run-11130），
+ * 因此路径可以在 hook 内精确推导。
+ *
+ * 兼容性：Cypress 内部若改动目录约定，这里只告警不抛错，静默退化为无缓存，不影响用例执行。
+ */
+
+/**
+ * 本轮运行实际使用的缓存目录（依赖 `run-<ppid>` 约定，pid 已实测为插件父进程 pid）。
+ *
+ * 两种浏览器的落盘位置不同（均实测确认）：
+ *   - electron（runner 默认）：`Partitions/run-<ppid>/Cache/`
+ *   - chrome：`cy/production/browsers/chrome-stable/run-<ppid>/CypressCache/`
+ */
+function currentCypressCacheDir(browser: any): string {
+  const name = String(browser?.name || 'electron');
+  const cypressRoot = cypressAppDataRoot();
+  if (name === 'chrome' || name === 'chromium') {
+    const dirName = name === 'chrome' ? 'chrome-stable' : name;
+    return path.join(cypressRoot, 'cy/production/browsers', dirName, `run-${process.ppid}`, 'CypressCache');
+  }
+  // electron 及未知浏览器：走 Cypress 的会话分区目录
+  return path.join(cypressRoot, 'Partitions', `run-${process.ppid}`, 'Cache');
+}
+
+/**
+ * Cypress 应用数据根目录，与 Cypress 内部 `ospath.data()` 的平台解析一致：
+ *   - macOS：~/Library/Application Support/Cypress
+ *   - Linux：$XDG_CONFIG_HOME/Cypress，默认 ~/.config/Cypress
+ *   - Windows：%APPDATA%\Cypress
+ * 不要硬编码 macOS 路径，否则线上 Linux 容器会缓存静默失效。
+ */
+function cypressAppDataRoot(): string {
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA || '', 'Cypress');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Cypress');
+  }
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'Cypress');
+}
+
+/**
+ * 稳定缓存目录：由 runner 统一解析并通过 KEVE_BROWSER_CACHE_DIR 下发（默认单一共享目录）。
+ *
+ * 注意：Cypress 与 Playwright 的磁盘缓存根结构不同，**不能共用同一目录**：
+ *   - Playwright: `<cacheDir>/Cache_Data/`
+ *   - Cypress:    `<profile>/CypressCache/Default/Cache/`
+ * 实测双向互灌均不命中（各自回源），因此 Cypress 归档到 `<cacheDir>/cypress/` 子目录，
+ * 与 Playwright 的 `<cacheDir>` 根内容互不干扰。
+ */
+function stableCacheDir(): string {
+  const base = activeBrowserCacheDir();
+  return base ? path.join(base, 'cypress') : '';
+}
+
+/** 启动前：把上次归档的缓存回灌到本轮 profile */
+function restoreCypressCache(browser: any): void {
+  const stable = stableCacheDir();
+  if (!stable) return;
+  try {
+    const cacheDir = currentCypressCacheDir(browser);
+    if (!fs.existsSync(stable)) return;
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.cpSync(stable, cacheDir, { recursive: true, force: true });
+    console.log(`[keve-bridge] Cypress 缓存回灌: ${stable} → ${cacheDir}`);
+  } catch (err: any) {
+    console.warn(`[keve-bridge] Cypress 缓存回灌失败（退化为无缓存）: ${err?.message || err}`);
+  }
+}
+
+/** 运行结束：把本轮缓存归档到稳定目录，供下次复用 */
+function persistCypressCache(browser: any): void {
+  const stable = stableCacheDir();
+  if (!stable) return;
+  try {
+    const cacheDir = currentCypressCacheDir(browser);
+    if (!fs.existsSync(cacheDir)) return;
+    // Chrome 的实际落盘布局为 CypressCache/Default/Cache/Cache_Data；
+    // Electron 因 legacy network path 不会落盘 AUT 响应，允许没有 Cache_Data。
+    const browserName = String(browser?.name || '');
+    if ((browserName === 'chrome' || browserName === 'chromium')
+      && !fs.existsSync(path.join(cacheDir, 'Default', 'Cache', 'Cache_Data'))) {
+      console.warn(`[keve-bridge] Cypress Chrome 缓存目录缺少 Default/Cache/Cache_Data，疑似布局变更或缓存未落盘：${cacheDir}`);
+    }
+    fs.mkdirSync(stable, { recursive: true });
+    // Cypress 归档目录没有 Chromium LRU，直接复制会只增不减；超过阈值时先清空再归档，
+    // 避免长期运行后磁盘持续膨胀（阈值与 Playwright 的 --disk-cache-size 保持一致）。
+    const maxStableBytes = 500 * 1024 * 1024;
+    if (dirSize(stable) > maxStableBytes) {
+      fs.rmSync(stable, { recursive: true, force: true });
+      fs.mkdirSync(stable, { recursive: true });
+      console.warn(`[keve-bridge] Cypress 缓存归档目录超过 ${maxStableBytes} 字节，已清空重建`);
+    }
+    fs.cpSync(cacheDir, stable, { recursive: true, force: true });
+    fs.chmodSync(stable, 0o700);
+    console.log(`[keve-bridge] Cypress 缓存归档: ${cacheDir} → ${stable}`);
+  } catch (err: any) {
+    console.warn(`[keve-bridge] Cypress 缓存归档失败: ${err?.message || err}`);
+  }
+}
+
+/** 递归计算目录字节数（归档阈值检查用，失败时按 0 处理避免误清空） */
+function dirSize(dir: string): number {
+  try {
+    let total = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) total += dirSize(p);
+      else if (entry.isFile()) total += fs.statSync(p).size;
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
 
 // ─── 报告落盘结构（与 Playwright JSON reporter 的 test-results.json 同构） ──
 
@@ -338,6 +468,12 @@ function writeTestResults(state: BridgeState): string {
  * 返回补好 `config.env.KEVE_BRIDGE_PORT` 的 config（Cypress 要求 return config）。
  */
 export async function setupKeveBridge(on: any, config: any): Promise<any> {
+  /**
+   * 本轮启动的浏览器信息；before:browser:launch 记录，after:run / exit 归档缓存时复用。
+   * 前提：当前 runner 为 workers=1 串行执行，单次运行只有一个浏览器实例；
+   * 若未来引入多 spec 并行，需改为按浏览器实例记录，避免只归档最后一个。
+   */
+  let activeBrowser: any = null;
   const state: BridgeState = {
     resultDir: resultDirOf(),
     confidencePath: path.join(resultDirOf(), 'confidence-data.jsonl'),
@@ -624,9 +760,21 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
   config.env = { ...(config.env || {}), ...browserEnv, ...injectedEnv, KEVE_BRIDGE_PORT: port };
   console.log(`[keve-bridge] listening on 127.0.0.1:${port} → ${state.resultDir}`);
 
+  /**
+   * 浏览器启动前回灌磁盘缓存。
+   * 缓存目录约定见文件头「浏览器磁盘缓存跨运行复用」一节。
+   */
+  on('before:browser:launch', (browser: any, launchOptions: any) => {
+    activeBrowser = browser;
+    restoreCypressCache(browser);
+    return launchOptions;
+  });
+
   // 报告收口放在 after:run：此时所有 spec 的 /report/test 都已落盘，
   // 且不依赖任何场景级的 afterAll（硬失败/中断也能出报告）。
   on('after:run', async (runResults: any) => {
+    // 先把本轮浏览器缓存归档，再出报告 —— 报告失败不应丢掉缓存
+    persistCypressCache(activeBrowser);
     try {
       // 最后一次用 Cypress run 全量结果校正，防止个别 spec 的 after:spec 未触发。
       let merged = 0;
@@ -686,6 +834,8 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
   });
   // Cypress 偶发不触发 after:run（硬失败/中断）——兜底退出时关闭
   process.once('exit', () => {
+    // 硬失败/中断时也尽力归档本轮缓存，避免丢缓存；after:run 正常时会先归档再退出，幂等无副作用。
+    persistCypressCache(activeBrowser);
     try { finalize(); } catch { /* 同步兜底，失败不阻塞退出 */ }
     try { server.close(); } catch { /* noop */ }
   });

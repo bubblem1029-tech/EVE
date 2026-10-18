@@ -285,11 +285,14 @@ async function openInteractive({ engine, input, taskRoot, specDir, resultDir, ro
   const backendRoot = input.backendRoot || defaultBackendRoot;
   const cypressBin = resolveEngineBin({ engine: 'cypress', backendRoot, suiteRoot });
   if (!cypressBin || !fs.existsSync(cypressBin)) fail('找不到 Cypress 可执行文件，请设置 KEVE_CYPRESS_BIN');
+  // 与 run 模式保持一致：默认 chrome，无 Chrome 时退回 electron 并告警。
+  const browser = resolveCypressBrowser();
   // cypress open 阻塞到窗口关闭才返回，和线上无头跑一致地走同一个 CLI 可执行文件。
   spawnSync(cypressBin, [
     'open',
     '--project', taskRoot,
     '--config-file', configPath,
+    '--browser', browser,
   ], {
     cwd: taskRoot,
     stdio: 'inherit',
@@ -538,6 +541,47 @@ function useCypressConfig({ taskDir, specDir, resultDir }) {
   return path.join(runtimeDir, 'cypress.config.mjs');
 }
 
+/**
+ * 探测系统是否装有 Chrome 可执行文件（Cypress `--browser chrome` 依赖它）。
+ * 覆盖 Linux 容器与 macOS 本地两种常见安装位置；探测失败时交由调用方决定降级策略。
+ */
+function hasChromeBinary() {
+  const candidates = [
+    process.env.CHROME_BIN,
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/opt/google/chrome/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean);
+  return candidates.some((candidate) => {
+    try {
+      return fs.existsSync(candidate);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * 解析 Cypress 浏览器：默认 chrome；无 Chrome 时退回 electron（仅默认值可降级）。
+ * 显式指定 KEVE_CYPRESS_BROWSER 时完全尊重调用方，缺失则直接报错。
+ */
+function resolveCypressBrowser() {
+  const explicitBrowser = process.env.KEVE_CYPRESS_BROWSER;
+  const requestedBrowser = explicitBrowser || 'chrome';
+  if (requestedBrowser !== 'chrome' || hasChromeBinary()) return requestedBrowser;
+  if (explicitBrowser) {
+    fail('显式指定了 KEVE_CYPRESS_BROWSER=chrome，但未检测到 Chrome 可执行文件，请先安装 Chrome 或改用其他浏览器');
+  }
+  console.warn(
+    '[run-dsl-task] 未检测到 Chrome，Cypress 退回 electron：浏览器资源缓存将不生效。'
+    + '如需缓存，请安装 google-chrome-stable 或设置 KEVE_CYPRESS_BROWSER 指向可用浏览器。',
+  );
+  return 'electron';
+}
+
 function runCypress({ input, taskDir, specDir, resultDir, round }) {
   const configPath = useCypressConfig({ taskDir, specDir, resultDir });
   const backendRoot = input.backendRoot || defaultBackendRoot;
@@ -545,11 +589,16 @@ function runCypress({ input, taskDir, specDir, resultDir, round }) {
   if (!cypressBin || !fs.existsSync(cypressBin)) {
     fail('找不到 Cypress 可执行文件，请设置 KEVE_CYPRESS_BIN');
   }
+  // 默认 chrome（缓存可生效）；显式指定则完全尊重调用方。若环境没有 Chrome，
+  // 退回 electron 保证任务能跑，但缓存会失效 —— 因此打出告警。
+  const browser = resolveCypressBrowser();
   const result = spawnSync(cypressBin, [
     'run',
     '--project', taskDir,
     '--config-file', configPath,
-    '--browser', process.env.KEVE_CYPRESS_BROWSER || 'electron',
+    // 默认 chrome：electron 下 Cypress 不把 AUT 响应写入磁盘缓存（实测确认），
+    // 资源缓存方案在 electron 上形同关闭；chrome 下缓存可正常跨运行复用。
+    '--browser', browser,
   ], {
     cwd: taskDir,
     stdio: 'inherit',
