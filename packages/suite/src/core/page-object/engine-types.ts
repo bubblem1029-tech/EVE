@@ -56,6 +56,8 @@ export interface EngineAdapter {
   forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 输入文本 */
   type(text: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
+  /** 上传文件（平台 UPLOAD_FILE）：fileSource 为 https URL 或本地路径；refs 指向 file input 或上传组件触发区 */
+  upload(fileSource: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 清空输入内容（平台 CLEAN） */
   clear(...refs: (ElementRef | ElementEntry)[]): Promise<void>;
   /** 悬停元素 */

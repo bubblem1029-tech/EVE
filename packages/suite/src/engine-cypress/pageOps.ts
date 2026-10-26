@@ -16,7 +16,7 @@
 export function pageOpsSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveOpsSource === "v7") return "cached";
+  if (window.__keveOpsSource === "v8") return "cached";
 
   function locator() {
     if (!window.__keveLocator) throw new Error("[keve] locator 未注入");
@@ -194,6 +194,39 @@ export function pageOpsSource(): string {
     }
   }
 
+  // 上传原语：meta = { name, mime, base64 }（spec 侧已 fetch + FileReader 转 base64）。
+  // refs 可直接指向 file input，也可指向「点击上传」触发区 —— 后者从触发区逐级上溯，
+  // 取第一层包含 input[type=file] 的祖先里的那个 input。不依赖 class 命名
+  // （实测 KwaiBI 自研上传器祖先链没有含 "upload" 的 class）。
+  function uploadFile(refs, meta) {
+    var el = first(refs);
+    var input = null;
+    if (el && el.tagName === "INPUT" && el.type === "file") input = el;
+    var node = !input && el ? el.parentElement : null;
+    while (node && node !== document.body) {
+      input = node.querySelector('input[type="file"]');
+      if (input) break;
+      node = node.parentElement;
+    }
+    if (!input) throw new Error("[keve] upload 未找到 file input：触发区及其祖先链上均无 input[type=file]");
+    var b64 = String((meta && meta.base64) || "");
+    if (!b64) throw new Error("[keve] upload 缺少文件内容（meta.base64 为空）");
+    var name = (meta && meta.name) || "upload-" + Date.now() + ".bin";
+    var mime = (meta && meta.mime) || "application/octet-stream";
+    var bin = window.atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    var file;
+    try { file = new File([bytes], name, { type: mime }); }
+    catch (e) { file = new Blob([bytes], { type: mime }); try { file.name = name; } catch (e2) { /* 只读 name 环境退化为默认名 */ } }
+    var dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return input.files.length;
+  }
+
   window.__keveOps = {
     version: "v1",
     resolve: resolve,
@@ -207,6 +240,11 @@ export function pageOpsSource(): string {
     visible: function (refs) { return isVisible(first(refs)); },
     hidden: function (refs) { var els = resolve(refs); return !els.length || !isVisible(els[0]); },
     exists: function (refs) { return resolve(refs).length > 0; },
+    rect: function (refs) {
+      var el = interactiveTarget(first(refs));
+      var r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    },
     attr: function (refs, name) { return attrOf(first(refs), name); },
     classes: function (refs) { return classList(first(refs)); },
     click: function (refs, dbl) { clickEl(first(refs), !!dbl); return "ok"; },
@@ -216,6 +254,7 @@ export function pageOpsSource(): string {
     scrollIntoView: function (refs) { first(refs).scrollIntoView({ block: "center", inline: "center" }); return "ok"; },
     scrollPage: function (dy) { window.scrollBy(0, Number(dy) || 600); return "ok"; },
     drag: function (srcRefs, dstRefs) { dragEl(first(srcRefs), first(dstRefs)); return "ok"; },
+    upload: function (refs, meta) { var n = uploadFile(refs, meta); if (!n) throw new Error("[keve] upload 文件未挂上（input.files 为空）"); return "ok"; },
     url: function () { return location.href; },
     title: function () { return String(document.title || ""); },
     waitSelector: function (css, visible) {
@@ -228,7 +267,7 @@ export function pageOpsSource(): string {
       return (0, eval)("(" + expr + ")");
     },
   };
-  window.__keveOpsSource = "v7";
+  window.__keveOpsSource = "v8";
   return "ok";
 })()`;
 }

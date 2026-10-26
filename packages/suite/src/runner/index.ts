@@ -40,12 +40,22 @@ export function resolveEngineBin({ engine, backendRoot, suiteRoot }: ResolveEngi
     ? process.env.KEVE_CYPRESS_BIN
     : process.env.KEVE_PLAYWRIGHT_BIN;
   const binName = engine === 'cypress' ? 'cypress' : 'playwright';
-  const candidates = [
-    envVar,
-    path.join(backendRoot, 'node_modules', '.bin', binName),
-    path.join(suiteRoot, 'node_modules', '.bin', binName),
-  ].filter(Boolean) as string[];
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+  // Playwright 的 spec 经 @kkeve/suite 解析 @playwright/test，落在 suite 依赖树；
+  // CLI 必须同树同实例——双实例会导致 test 装饰器/收集器不互通（本地 pnpm link 场景实测踩坑）。
+  // suite 自带 .bin（workspace/link 安装）时优先；平台由 backend 安装、suite 无 .bin 时自然回退 backendRoot。
+  const candidates = engine === 'cypress'
+    ? [
+        envVar,
+        path.join(backendRoot, 'node_modules', '.bin', binName),
+        path.join(suiteRoot, 'node_modules', '.bin', binName),
+      ]
+    : [
+        envVar,
+        path.join(suiteRoot, 'node_modules', '.bin', binName),
+        path.join(backendRoot, 'node_modules', '.bin', binName),
+      ];
+  const valid = candidates.filter(Boolean) as string[];
+  return valid.find((candidate) => fs.existsSync(candidate)) || valid[0];
 }
 
 /** esbuild 模块路径解析，Cypress 预处理器依赖。候选顺序与 resolveEngineBin 一致。 */
@@ -89,6 +99,11 @@ export function buildExecEnv({
   suiteRoot,
 }: BuildExecEnvOptions): NodeJS.ProcessEnv {
   const backendRoot = input.backendRoot || defaultBackendRoot;
+  // 落盘的 execution-input.json 会把 apiKey 脱敏成 "<redacted>"（非空、会盖过 env）；
+  // 本地链路由 execution-adapter spawnRunner 在内存注入真实 key，这里把脱敏值视为缺失。
+  const llmApiKey = input.llm?.apiKey && !/^<redacted>$/i.test(String(input.llm.apiKey).trim())
+    ? input.llm.apiKey
+    : process.env.KEVE_LLM_API_KEY || '';
   return {
     ...process.env,
     KEVE_TASK_DIR: taskDir,
@@ -107,7 +122,7 @@ export function buildExecEnv({
       || '{}',
     KEVE_LLM_BASE_URL: input.llm?.baseUrl || process.env.KEVE_LLM_BASE_URL || '',
     KEVE_LLM_MODEL_NAME: input.llm?.model || process.env.KEVE_LLM_MODEL_NAME || '',
-    KEVE_LLM_API_KEY: input.llm?.apiKey || process.env.KEVE_LLM_API_KEY || '',
+    KEVE_LLM_API_KEY: llmApiKey,
     KEVE_ENGINE: engine,
     KEVE_ESBUILD_MODULE: resolveEsbuildModule(backendRoot, suiteRoot) || '',
   };

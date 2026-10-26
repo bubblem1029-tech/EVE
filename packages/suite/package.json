@@ -1,6 +1,6 @@
 {
   "name": "@kkeve/suite",
-  "version": "0.0.29",
+  "version": "0.0.31",
   "description": "AI-powered full-stack test agent CLI - static analysis, unit test, component test, E2E test, execute, evaluate, and report",
   "license": "MIT",
   "bin": {
@@ -59,6 +59,10 @@
     "./runner": {
       "types": "./dist/runner/index.d.ts",
       "default": "./dist/runner/index.js"
+    },
+    "./api-test": {
+      "types": "./dist/engine-playwright/api-test.d.ts",
+      "default": "./dist/engine-playwright/api-test.js"
     }
   },
   "files": [

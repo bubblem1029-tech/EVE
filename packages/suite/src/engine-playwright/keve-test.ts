@@ -416,7 +416,10 @@ export const test = base.extend<KeveFixture>({
               ? new Error(fnError) // 截图对比：保留带差异率/区块数/基线版本的结构化错误文案
               : (fnError && isAssertionFailure(fnError) && !fnBlocked)
                 ? new Error(`Assertion failed: ${fnError}`)
-                : new Error(`Expected not achieved: ${options.expected}`),
+                : new Error(
+                    // fn 错误（如含 actual 的文本断言失败）不能被吞掉，否则报告只剩期望、丢掉实际值
+                    `Expected not achieved: ${options.expected}${fnErrorRaw ? ` — ${String(fnErrorRaw.message || fnErrorRaw).slice(0, 400)}` : ''}`,
+                  ),
       } as any;
       // Attach Agent conclusion for downstream consumers
       if (reactResult.conclusion) (result as any).conclusion = reactResult.conclusion;

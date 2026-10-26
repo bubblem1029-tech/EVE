@@ -52,6 +52,7 @@ async function ensurePlaywrightBrowsers(): Promise<void> {
 }
 
 export interface RunOptions {
+  mode?: "browser" | "api";
   config?: string;
   round?: string;
   retryFrom?: string;
@@ -128,6 +129,8 @@ export class KeveRunError extends Error {
 }
 
 export async function run(options: RunOptions): Promise<RunResult> {
+  if (options.mode && !["browser", "api"].includes(options.mode)) throw new KeveRunError("mode must be browser or api");
+  const apiMode = options.mode === "api";
   const keveDir = findKeveDir();
   const cwd = process.cwd();
 
@@ -174,6 +177,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
   resultsFile = path.join(resultDir, 'test-results.json');
 
   const pwArgs = ['playwright', 'test', '--config', configPath];
+  if (apiMode) pwArgs.push('--output', path.join(resultDir, 'api-output'));
 
   let effectiveGrep = options.grep || '';
 
@@ -220,6 +224,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     ...process.env as Record<string, string>,
     KEVE_TASK_DIR: taskDir,
     KEVE_ROUND: String(round),
+    KEVE_EXECUTION_MODE: apiMode ? "api" : "browser",
   };
 
   if (!env.BASE_URL && !env.PWGEN_TARGET_URL) {
@@ -238,9 +243,10 @@ export async function run(options: RunOptions): Promise<RunResult> {
 
   console.log(chalk.blue(`  ▶ Round ${round} — Executing Playwright tests...\n`));
 
-  await ensurePlaywrightBrowsers();
+  if (!apiMode) await ensurePlaywrightBrowsers();
+  else console.log(chalk.gray("  API mode: skipping browser installation and CDP setup"));
 
-  if (!env.KEVE_CDP_ENDPOINT && !env.KEVE_CDP_WS_ENDPOINT) {
+  if (!apiMode && !env.KEVE_CDP_ENDPOINT && !env.KEVE_CDP_WS_ENDPOINT) {
     // 不再盲目设置 KEVE_CDP_ENDPOINT fallback — 如果 browserSetup() 未成功启动 Chrome，
     // 这个 fallback 会让 isCdpMode() 返回 true → getCdpBrowser() 去连一个不存在的 CDP → throw
     // 现在由 getCdpBrowser() 内部处理 graceful fallback 到非 CDP 模式
@@ -248,7 +254,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
   }
 
   const exitCode = await new Promise<number>((resolve) => {
-    const child = spawn('npx', pwArgs, {
+    const executable = apiMode ? process.execPath : 'npx';
+    const args = apiMode ? [require.resolve('@playwright/test/cli'), ...pwArgs.slice(1)] : pwArgs;
+    const child = spawn(executable, args, {
       cwd,
       env,
       stdio: ['inherit', 'pipe', 'pipe'],
@@ -257,8 +265,11 @@ export async function run(options: RunOptions): Promise<RunResult> {
     child.stdout.on('data', (data) => process.stdout.write(data));
     child.stderr.on('data', (data) => process.stderr.write(data));
 
-    child.on('close', (code) => resolve(code ?? 1));
-    child.on('error', () => resolve(1));
+    const interrupt = () => { child.kill('SIGTERM'); };
+    if (apiMode) { process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt); }
+    const cleanup = () => { if (apiMode) { process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', interrupt); } };
+    child.on('close', (code) => { cleanup(); resolve(code ?? 1); });
+    child.on('error', () => { cleanup(); resolve(1); });
   });
 
   if (exitCode !== 0 && options.verbose) {

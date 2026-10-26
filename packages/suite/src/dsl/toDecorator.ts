@@ -351,22 +351,44 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       emit([`await engine.type(${valueExpr(d.value, ctx, 'INPUT_ELEMENT 输入值')}, ${chain});`, ...waitExprs(d)]);
       break;
     }
+    case 'UPLOAD_FILE': {
+      // 文件上传算子：value = 图片/文件来源（https URL 或本地路径），
+      // context 指向 input[type=file] 本身（display:none 也能设）或上传组件触发区。
+      // 历史背景：上传必配图类用例（如 S439）当年因自动化吊不起系统文件选择器，
+      // 被迫退化成「断言必填校验拦截」的负向用例 —— 本算子补齐正向创建闭环的能力。
+      const val = resolveValue(d.value, ctx);
+      if (!val) {
+        throw new Error(`UPLOAD_FILE 缺少文件来源（URL 或本地路径），拒绝生成可误报通过的跳过步骤: ${stepText}`);
+      }
+      emit([`await engine.upload(${valueExpr(d.value, ctx, 'UPLOAD_FILE 文件来源')}, ${chain});`, ...waitExprs(d)]);
+      break;
+    }
     case 'MOVE_ELEMENT': {
       // 历史 DSL 把「hover 到某行后再点行内操作」建模成 children:
       // MOVE_ELEMENT(context=行) + CLICK_ELEMENT(context=更多)。
       // 只生成 hover 会漏掉动作，下一步「点删除」必然因下拉未展开而失败。
-      const childClicks: string[] = [];
+      // 「移动到某处后输入/清空」（如移动到字段列表点搜索框再输入关键字）
+      // 也走同一 children 建模：INPUT_ELEMENT / CLEAN。
+      const childActions: string[] = [];
       for (const childAction of Array.isArray(d.children) ? d.children : []) {
         const childOp = String(childAction?.operation || '');
         const childHops = chainExprOrNull(childAction?.context, ctx);
         if (!childHops) continue;
-        if (childOp === 'CLICK_ELEMENT') childClicks.push(`await engine.click(${childHops});`);
-        else if (childOp === 'FORCE_CLICK_ELEMENT') childClicks.push(`await engine.forceClick(${childHops});`);
+        if (childOp === 'CLICK_ELEMENT') childActions.push(`await engine.click(${childHops});`);
+        else if (childOp === 'FORCE_CLICK_ELEMENT') childActions.push(`await engine.forceClick(${childHops});`);
+        else if (childOp === 'INPUT_ELEMENT') {
+          const childVal = resolveValue(childAction?.value, ctx);
+          if (!childVal) {
+            throw new Error(`MOVE_ELEMENT 子动作 INPUT_ELEMENT 缺少输入值，拒绝生成可误报通过的跳过步骤: ${stepText}`);
+          }
+          childActions.push(`await engine.type(${valueExpr(childAction?.value, ctx, 'MOVE_ELEMENT 子动作输入值')}, ${childHops});`);
+        }
+        else if (childOp === 'CLEAN') childActions.push(`await engine.clear(${childHops});`);
         else if (childOp) {
           throw new Error(`MOVE_ELEMENT 子动作「${childOp}」暂不支持: ${stepText}`);
         }
       }
-      emit([`await engine.hover(${chain});`, ...childClicks, ...waitExprs(d)]);
+      emit([`await engine.hover(${chain});`, ...childActions, ...waitExprs(d)]);
       break;
     }
     case 'SCROLL':

@@ -68,7 +68,8 @@ program
 
 program
   .command('run')
-  .description('Execute Playwright tests')
+  .description('Execute browser or API scripts')
+  .option('--mode <mode>', 'Execution mode: browser or api', 'browser')
   .option('--config <path>', 'Playwright config path', '.keve/keve-test.config.ts')
   .option('--round <N>', 'Execution round number (auto-increment if omitted)')
   .option('--retry-from <round>', 'Re-run failed cases from specified round number')
@@ -78,7 +79,8 @@ program
   .action(async (options) => {
     const { run, KeveRunError } = await import('../commands/run.js');
     try {
-      await run(options);
+      const result = await run(options);
+      if (options.mode === "api") process.exitCode = result.exitCode;
     } catch (e: any) {
       if (e instanceof KeveRunError) {
         console.error(`\n  ✗ ${e.message}`);

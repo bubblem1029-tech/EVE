@@ -70,7 +70,7 @@ export class CypressEngine implements EngineAdapter {
    */
   private async ensureReady(): Promise<void> {
     const has = await this.cdp.evaluateInAut<boolean>(
-      'Boolean(window.__keveOpsSource === "v7" && window.__keveNetLogSource === "v1" && window.__keveLocatorSource === "v5")',
+      'Boolean(window.__keveOpsSource === "v8" && window.__keveNetLogSource === "v1" && window.__keveLocatorSource === "v5")',
     ).catch(() => false);
     if (has) return;
     const { locatorSource } = await import('../dsl/locatorSource.js');
@@ -203,9 +203,35 @@ export class CypressEngine implements EngineAdapter {
     await this.withWait(() => this.opsCall('click', r, true), 20000);
   }
 
-  /** 强制点击：CDP 下没有 actionability 检查，语义等同于 click */
+  /**
+   * 强制点击：优先走 CDP trusted 鼠标事件（isTrusted=true，与真人输入同源），
+   * 绕过 isolated world 合成事件与部分弹层组件的兼容性问题；CDP 失败时
+   * 降级回普通合成 click，保证行为向后兼容。
+   */
   async forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    await this.click(...refs);
+    const r = normalizeRefs(refs);
+    await this.withWait(async () => {
+      try {
+        const rect = await this.ops<{ x: number; y: number; width: number; height: number }>(
+          `window.__keveOps.rect(${JSON.stringify(r)})`,
+        );
+        if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y)) {
+          throw new Error('元素未找到: forceClick rect 解析失败');
+        }
+        const auto = await this.cdp.autRect();
+        await this.cdp.trustedClickAt(
+          rect.x + (auto?.x || 0) + rect.width / 2,
+          rect.y + (auto?.y || 0) + rect.height / 2,
+        );
+        return 'ok';
+      } catch (err: any) {
+        if (!/元素未找到|rect 解析失败|Input\.dispatchMouseEvent/.test(String(err?.message || err))) {
+          throw err;
+        }
+        await this.opsCall('click', r, false);
+        return 'fallback';
+      }
+    }, 20000);
   }
 
   async type(text: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
@@ -227,6 +253,37 @@ export class CypressEngine implements EngineAdapter {
     const s = normalizeRefs([source]);
     const t = normalizeRefs([target]);
     await this.withWait(() => this.opsCall('drag', s, t));
+  }
+
+  /**
+   * 上传：spec 侧 fetch 文件 URL → FileReader 转 base64 → AUT 里挂到 input.files。
+   * 本文件跑在 Cypress spec 浏览器上下文，没有 node:fs，本地路径不支持——
+   * 需要 local file 的场景请用 playwright 引擎。跨域 fetch 可能被 CORS 拦，
+   * 失败时点名原因（file URL 大多允许任意来源读取，内网 CDN 需确认响应头）。
+   */
+  async upload(fileSource: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+    const source = String(fileSource || '').trim();
+    if (!source) throw new Error('engine.upload 缺少文件来源（cypress 引擎仅支持 https 文件 URL）');
+    if (!/^https?:\/\//i.test(source)) {
+      throw new Error('engine.upload cypress 引擎不支持本地路径，请使用 https 文件 URL 或改用 playwright 引擎: ' + source);
+    }
+    const res = await fetch(source).catch((err) => {
+      throw new Error(`engine.upload 文件下载失败（多为 CORS 拦截）：${source} — ${String(err?.message || err)}`);
+    });
+    if (!res.ok) throw new Error(`engine.upload 文件下载失败 HTTP ${res.status}: ${source}`);
+    const pathName = new URL(source).pathname;
+    const fallbackName = pathName.split('/').pop() || `upload-${Date.now()}.bin`;
+    const fallbackMime = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
+    const reader = new FileReader();
+    const blob = await res.blob();
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('engine.upload FileReader 读取失败'));
+      reader.readAsDataURL(blob);
+    });
+    const meta = { name: fallbackName, mime: fallbackMime, base64: dataUrl.split(',')[1] || '' };
+    const r = normalizeRefs(refs);
+    await this.withWait(() => this.opsCall('upload', r, meta));
   }
 
   async scroll(...refs: (ElementRef | ElementEntry)[]): Promise<void> {

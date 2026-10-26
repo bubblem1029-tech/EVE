@@ -317,6 +317,19 @@ export function createCdp(send: CdpSend) {
   }
 
   /**
+   * 浏览器级 trusted 鼠标点击：坐标是顶层页面视口坐标（调用方需叠加
+   * autRect 偏移）。与 isolated world 里的合成 mouse 事件不同，CDP
+   * Input.dispatchMouseEvent 产生 `isTrusted=true` 的真实输入事件，
+   * 能命中依赖真实交互的组件（如日期弹层在 mousedown/click 组合下的开关）。
+   */
+  async function trustedClickAt(x: number, y: number): Promise<void> {
+    const base = { x, y, button: 'left', clickCount: 1 };
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base, buttons: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0 });
+  }
+
+  /**
    * 元素级截图：`clip` 是 AUT 视口坐标（getBoundingClientRect 的 x/y/width/height），
    * 这里叠加 AUT iframe 在 runner 顶层页里的偏移与顶层滚动量，得到
    * Page.captureScreenshot 需要的顶层页面坐标。
@@ -403,6 +416,7 @@ export function createCdp(send: CdpSend) {
     reload,
     autRect,
     screenshot,
+    trustedClickAt,
     screenshotClip,
     injectLocator,
     installPreloadScript,

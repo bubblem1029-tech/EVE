@@ -18,6 +18,30 @@ import { isElementFactory } from '../core/page-object/definePage.js';
 import type { EngineAdapter, WaitForResponseOptions, WaitForResponseResult } from '../core/page-object/engine-types.js';
 import { resolvePageUrl } from '../core/page-object/engine-types.js';
 
+import fs from 'node:fs';
+import path from 'node:path';
+
+
+/**
+ * 解析上传文件来源：https URL → 下载为 { name, mimeType, buffer }（node fetch 全局可用）；
+ * 本地路径 → 校验存在后交给 setInputFiles 原生支持。
+ */
+async function resolveUploadFileSource(source: string): Promise<string | { name: string; mimeType: string; buffer: Buffer }> {
+  if (/^https?:\/\//i.test(source)) {
+    const res = await fetch(source);
+    if (!res.ok) throw new Error(`engine.upload 下载文件失败 HTTP ${res.status}: ${source}`);
+    if (!res.body) throw new Error(`engine.upload 下载文件响应为空: ${source}`);
+    const pathname = new URL(source).pathname;
+    const name = pathname.split('/').pop() || `upload-${Date.now()}`;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer.length) throw new Error(`engine.upload 下载文件内容为空: ${source}`);
+    return { name, mimeType: res.headers.get('content-type') || 'application/octet-stream', buffer };
+  }
+  const abs = path.resolve(source);
+  if (!fs.existsSync(abs)) throw new Error(`engine.upload 本地文件不存在: ${abs}`);
+  return abs;
+}
+
 // ─── EngineAdapter Interface ──────────────────────────────────────────
 //
 // 契约本体在 ../core/page-object/engine-types.js（零依赖、浏览器安全）——
@@ -123,13 +147,26 @@ export class PlaywrightEngine implements EngineAdapter {
     return resolveChain(this.page, ...normalized);
   }
 
+  /**
+   * 交互动作（点击/输入/hover）专用解析：过滤掉不可见元素。
+   *
+   * 关键场景：element-plus 弹层（日期面板等）关闭后 DOM 仍驻留（display:none），
+   * 同一选择器会同时命中「隐藏的历史副本 + 可见的当前实例」（实测 .ks-date-table__row
+   * .today 命中 2 个：1 可见 + 1 隐藏）。locator.first() 按 DOM 序取第一个，
+   * 命中隐藏副本时交互会等它可见直到超时。隐藏元素本来就不可交互，先过滤
+   * visible=true；全部不可见时仍走 Playwright 默认等待超时，不会假绿。
+   */
+  private resolveInteractive(refs: (ElementRef | ElementEntry)[]): Locator {
+    return this.resolve(refs).locator('visible=true');
+  }
+
   async click(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    const locator = this.resolveInteractive(refs);
     await locator.first().click();
   }
 
   async dblClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    const locator = this.resolveInteractive(refs);
     await locator.first().dblclick();
   }
 
@@ -139,7 +176,7 @@ export class PlaywrightEngine implements EngineAdapter {
   }
 
   async clear(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    const locator = this.resolveInteractive(refs);
     await locator.first().fill('');
   }
 
@@ -214,12 +251,49 @@ export class PlaywrightEngine implements EngineAdapter {
   }
 
   async type(text: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    const locator = this.resolveInteractive(refs);
     await locator.first().fill(text);
   }
 
+  async upload(fileSource: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+    const source = String(fileSource || '').trim();
+    if (!source) throw new Error('engine.upload 缺少文件来源（https URL 或本地路径）');
+    const scope = this.resolve(refs).first();
+    // file input 通常是 display:none —— 这里刻意不走 resolveInteractive（visible 过滤）：
+    // setInputFiles 不要求元素可见。定位不依赖组件 class 命名（实测 KwaiBI 自研上传器
+    // 祖先链没有 class 含 "upload"，locator 的 ancestor 策略会白耗 10s 超时）：
+    // evaluateHandle 从触发区逐级上溯，返回第一层包含 input[type=file] 的祖先里的那个 input。
+    const files = await resolveUploadFileSource(source);
+    const inputHandle = await scope.evaluateHandle((el) => {
+      if (el instanceof HTMLInputElement && el.type === 'file') return el;
+      let node: HTMLElement | null = el.parentElement;
+      while (node) {
+        const input = node.querySelector<HTMLInputElement>('input[type="file"]');
+        if (input) return input;
+        node = node.parentElement;
+      }
+      return null;
+    });
+    const input = inputHandle.asElement();
+    if (input) {
+      await input.setInputFiles(files);
+      // 确定性校验：文件必须真正挂上（change 已被组件接收），避免超限/格式拦截时假绿
+      const count = await input.evaluate((el) => (el instanceof HTMLInputElement && el.type === 'file' ? el.files.length : 0));
+      inputHandle.dispose();
+      if (!count) throw new Error(`engine.upload 文件未挂上（input.files 为空），检查文件来源与 accept 限制: ${source}`);
+      return;
+    }
+    inputHandle.dispose();
+    // 策略2：组件把 file picker 做成「点击即唤起原生选择器」（DOM 里常驻 input 缺位）——
+    // 拦截 Playwright filechooser 事件完成选图，绕开系统级文件对话框不可自动化的历史问题。
+    const chooserPromise = this.page.waitForEvent('filechooser', { timeout: 8000 });
+    await scope.click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles(files);
+  }
+
   async hover(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    const locator = this.resolveInteractive(refs);
     await locator.first().hover();
   }
 
@@ -240,22 +314,51 @@ export class PlaywrightEngine implements EngineAdapter {
 
   async expectText(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolve(refs);
-    await pwExpect(locator.first()).toContainText(expected);
+    try {
+      await pwExpect(locator.first()).toContainText(expected);
+    } catch (err) {
+      // 断言失败必须携带实际文本，否则上层只能输出「期望了什么」——修复方（AI/回填器）无法判断该改成什么
+      let actual = '';
+      try { actual = (await locator.first().textContent()) ?? ''; } catch { /* 元素不在了就让原错误上抛 */ }
+      if (!actual) throw err;
+      throw new Error(`文本包含断言失败：期望包含「${expected}」，实际文本「${String(actual).trim().slice(0, 300)}」（元素链：${String(err.message).slice(0, 200)}）`);
+    }
   }
 
   async expectNotText(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolve(refs);
-    await pwExpect(locator.first()).not.toContainText(expected);
+    try {
+      await pwExpect(locator.first()).not.toContainText(expected);
+    } catch (err) {
+      let actual = '';
+      try { actual = (await locator.first().textContent()) ?? ''; } catch { throw err; }
+      if (!actual) throw err;
+      throw new Error(`文本排除断言失败：期望不包含「${expected}」，实际文本「${String(actual).trim().slice(0, 300)}」`);
+    }
   }
 
   async expectTextEquals(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolve(refs);
-    await pwExpect(locator.first()).toHaveText(expected);
+    try {
+      await pwExpect(locator.first()).toHaveText(expected);
+    } catch (err) {
+      let actual = '';
+      try { actual = (await locator.first().textContent()) ?? ''; } catch { throw err; }
+      if (!actual) throw err;
+      throw new Error(`文本相等断言失败：期望「${expected}」，实际「${String(actual).trim().slice(0, 300)}」`);
+    }
   }
 
   async expectTextNotEquals(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolve(refs);
-    await pwExpect(locator.first()).not.toHaveText(expected);
+    try {
+      await pwExpect(locator.first()).not.toHaveText(expected);
+    } catch (err) {
+      let actual = '';
+      try { actual = (await locator.first().textContent()) ?? ''; } catch { throw err; }
+      if (!actual) throw err;
+      throw new Error(`文本排除相等断言失败：期望不等于「${expected}」，实际「${String(actual).trim().slice(0, 300)}」`);
+    }
   }
 
   /**
