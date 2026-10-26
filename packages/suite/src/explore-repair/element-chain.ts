@@ -12,7 +12,9 @@ export interface DomChainHop {
   value: string;
 }
 
-/** 在浏览器里执行的函数体：从目标元素向上收集稳定定位跳（最多 6 跳） */
+/** 在浏览器里执行的函数体：从目标元素向上收集定位跳（最多 6 跳）。
+ * 稳定跳优先（e2e 属性 → 非 hash class → 叶子文本）；全被过滤时允许「不稳定 class」兜底——
+ * 有链总比没链强（css-xxx 模块类在单站点内常仍可定位），可写回性由校验环节决定。 */
 export const CAPTURE_DOM_CHAIN_FN = `
 (el) => {
   const UNSTABLE = /(^|[ _-])(css|[a-f0-9]{8,})([ _-]|$)/i;
@@ -25,8 +27,12 @@ export const CAPTURE_DOM_CHAIN_FN = `
       out.push({ kind: 'selector', value: '[data-e2e-name="' + e2e + '"]' });
       continue;
     }
-    const classes = String(node.getAttribute('class') || '').split(/\\s+/).filter(Boolean)
-      .filter((c) => !UNSTABLE.test(c));
+    const classes = String(node.getAttribute('class') || '').split(/\\\\s+/).filter(Boolean);
+    const stable = classes.filter((c) => !UNSTABLE.test(c));
+    if (stable.length) {
+      out.push({ kind: 'class', value: stable[0] });
+      continue;
+    }
     if (classes.length) {
       out.push({ kind: 'class', value: classes[0] });
       continue;
@@ -36,7 +42,6 @@ export const CAPTURE_DOM_CHAIN_FN = `
       out.push({ kind: 'text', value: text });
     }
   }
-  // 链语义：从外层祖先到目标自身；行内文本 hop 保持在末位的自然顺序即可
   return out.slice(0, 6);
 }
 `;
