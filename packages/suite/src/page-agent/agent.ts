@@ -1126,6 +1126,8 @@ export async function reactLoop(
         signal?: AbortSignal;
         goalScreenshotBefore?: string;
         fnAfterScreenshot?: string;
+        /** 外部 hooks 转发：探索修复等旁路消费者需要 onAfterStep 逐步捕获 */
+        hooks?: AgentHooks;
     } & AgentHostOptions = {},
 ): Promise<{
     actions: any[];
@@ -1145,7 +1147,16 @@ export async function reactLoop(
         loadInitialImages: options.loadInitialImages,
         llm: options.llm,
         hooks: {
+            // 转发外部 hooks：原实现直接覆盖 AgentHooks，探索修复等旁路消费者拿不到 onAfterStep
+            onAfterStep: options.hooks?.onAfterStep,
+            onBeforeTask: options.hooks?.onBeforeTask,
+            onBeforeStep: options.hooks?.onBeforeStep,
             onAfterTask: async (_agent, result) => {
+                // 外部 onAfterTask 优先（如注册了则跳过内置诊断逻辑）
+                if (options.hooks?.onAfterTask) {
+                    await options.hooks.onAfterTask(_agent, result);
+                    return;
+                }
                 const partial: Partial<AgentResult> = {};
                 // 1. Diagnostic hints for failures
                 if (!result.success) {

@@ -54,7 +54,7 @@ export { KEVE_ENV, resolvePageUrl } from '../core/page-object/engine-types.js';
 // ─── Playwright Engine Implementation ─────────────────────────────────
 
 export class PlaywrightEngine implements EngineAdapter {
-  constructor(private page: Page) {}
+  constructor(private page: Page) { }
 
   async navigate(url: string): Promise<void> {
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });

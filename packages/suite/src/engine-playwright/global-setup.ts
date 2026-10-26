@@ -96,13 +96,10 @@ export function writeStorageState(storageStatePath: string): number {
 
 export default async function () {
   const storageStatePath = resolveStorageStatePath();
-  const count = writeStorageState(storageStatePath);
-  if (count > 0) {
-    console.log(`[keve global-setup] 注入服务端 cookies ${count} 条 → ${storageStatePath}`);
-  } else {
-    console.warn(
-      `[keve global-setup] 未收到服务端 cookies（KEVE_SSO_COOKIES 为空），`
-      + `写入空 storageState → ${storageStatePath}`,
-    );
+  const cookies = readInjectedCookies();
+  if (!cookies.length) {
+    throw new Error('未收到服务端 SSO cookies（KEVE_SSO_COOKIES 为空），用例要求必须携带登录态');
   }
+  const count = writeStorageState(storageStatePath);
+  console.log(`[keve global-setup] 注入服务端 cookies ${count} 条 → ${storageStatePath}`);
 }

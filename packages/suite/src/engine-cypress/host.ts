@@ -68,13 +68,17 @@ export function resolveBaseUrl(): string {
 /** 服务端解析好的 SSO cookie（经 config.env 下发，浏览器侧可读） */
 function readInjectedCookies(): any[] {
   const raw = cy().env?.('KEVE_SSO_COOKIES');
-  if (!raw) return [];
+  if (!raw) {
+    throw new Error('未收到 KEVE_SSO_COOKIES，用例要求必须携带 SSO 登录态');
+  }
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error('KEVE_SSO_COOKIES 为空，用例要求必须携带 SSO 登录态');
+    }
+    return parsed;
   } catch {
-    console.warn('[cypress-engine] KEVE_SSO_COOKIES 解析失败，按未登录执行');
-    return [];
+    throw new Error('KEVE_SSO_COOKIES 缺失或格式无效，用例要求必须携带 SSO 登录态');
   }
 }
 
@@ -419,16 +423,12 @@ export function installCypressHost(): KeveHost {
          */
         const injectCookiesBeforeVisit = async () => {
           const cookies = readInjectedCookies();
-          if (!cookies.length) {
-            console.warn('[cypress-engine] 未收到 KEVE_SSO_COOKIES，按未登录执行（可能跳转 SSO 登录页）');
-            return;
-          }
           try {
             const engine = createCypressEngine(createBridge());
             await engine.injectCookies(cookies);
             console.log(`[cypress-engine] 首次导航前已注入 SSO cookie ${cookies.length} 条`);
           } catch (err: any) {
-            console.warn(`[cypress-engine] cookie 注入失败（继续执行）：${err?.message || err}`);
+            throw new Error(`[cypress-engine] SSO cookie 注入失败：${err?.message || err}`);
           }
         };
 
