@@ -372,7 +372,10 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     // 覆盖发生在此处，事后无法从 reactResult 反推（conclusion 已被改写），
     // 因此就地留痕，供面板与 errorMessage 说明「为什么和 Agent 的结论相反」。
     let overriddenByFn = false;
-    if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError)) {
+    // 证据门：Agent done(pass) 必带完成时截图——有截图佐证的语义通过，不被 fn
+    // 精确断言的格式差异（空格/全半角等）覆盖为 FAIL；无证据仍维持覆盖防幻觉假绿。
+    const hasAgentEvidence = (reactResult.agentScreenshots?.length ?? 0) > 0;
+    if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError) && !hasAgentEvidence) {
       console.log(`[keveGoal] ⚠️ "${options.step}" Agent 判 PASS 但 fn 断言失败 — 覆盖为 FAIL`);
       reactResult.expectedMet = false;
       reactResult.conclusion = 'fail';

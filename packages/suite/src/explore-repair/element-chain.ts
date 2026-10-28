@@ -14,9 +14,18 @@ export interface DomChainHop {
 
 /** 在浏览器里执行的函数体：从目标元素向上收集定位跳（最多 6 跳）。
  * 稳定跳优先（e2e 属性 → 非 hash class → 叶子文本）；全被过滤时允许「不稳定 class」兜底——
- * 有链总比没链强（css-xxx 模块类在单站点内常仍可定位），可写回性由校验环节决定。 */
+ * 有链总比没链强（css-xxx 模块类在单站点内常仍可定位），可写回性由校验环节决定。
+ * 同时提取目标元素的可读描述（aria-label → placeholder/title/alt → 自身文本），供生成步骤 text。 */
 export const CAPTURE_DOM_CHAIN_FN = `
 (el) => {
+  const candidates = [
+    el.getAttribute('aria-label'),
+    el.getAttribute('placeholder'),
+    el.getAttribute('title'),
+    el.getAttribute('alt'),
+    String(el.innerText || '').trim(),
+  ];
+  const describe = candidates.find((v) => v && String(v).trim());
   const UNSTABLE = /(^|[ _-])(css|[a-f0-9]{8,})([ _-]|$)/i;
   const out = [];
   for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 10; depth += 1, node = node.parentElement) {
@@ -42,13 +51,13 @@ export const CAPTURE_DOM_CHAIN_FN = `
       out.push({ kind: 'text', value: text });
     }
   }
-  return out.slice(0, 6);
+  return { hops: out.slice(0, 6), describe: describe ? String(describe).replace(/\\s+/g, ' ').trim().slice(0, 60) : '' };
 }
 `;
 
 export interface CapturedChain {
   ref: string;
   hops: DomChainHop[];
-  /** 目标元素的可读描述（role "name"），供生成步骤 text */
+  /** 目标元素的可读描述（aria-label / 占位文案 / 自身文本），供生成步骤 text */
   describe?: string;
 }

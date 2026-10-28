@@ -24,11 +24,8 @@ import { reactLoop } from '../page-agent/agent.js';
 import { emptyRuntimeDiagnostics, mergeRuntimeDiagnostics, buildRuntimeDiagnostics } from '../page-agent/diagnostics.js';
 
 /** 单个用例体允许的最长执行时间（与 Playwright 侧 timeout 对齐） */
-const CY_TEST_TIMEOUT_MS = Number(process.env.KEVE_CY_TEST_TIMEOUT || 300_000);
-
-/** 单个 goal 的探索上限（与 Playwright keve-test.ts 的 GOAL_TIMEOUT_MS 对齐） */
-const CY_GOAL_TIMEOUT_MS = Number(
-  (globalThis as any).Cypress?.env?.('KEVE_CY_GOAL_TIMEOUT') || 120_000,
+const CY_TEST_TIMEOUT_MS = Number(
+  process.env.KEVE_CY_TEST_TIMEOUT || 1_200_000,
 );
 
 /**
@@ -211,7 +208,6 @@ function installGoalExplorer(engine: CypressEngine, bridge: ReturnType<typeof cr
   setCyGoalExplorer(async (options, ctx): Promise<CyGoalExploreResult | undefined> => {
     const page = new CyAgentPage(cdp);
     const controller = new AbortController();
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     const host = createCyAgentHost(bridge, controller.signal);
     try {
       const reactPromise = reactLoop(page, options.step, options.expected, {
@@ -229,41 +225,7 @@ function installGoalExplorer(engine: CypressEngine, bridge: ReturnType<typeof cr
         loadInitialImages: host.loadInitialImages,
         llm: host.llm,
       });
-      // AbortSignal 只能请求协作式终止，不能保证第三方 LLM 或页面 hook
-      // 及时结束 Promise。必须同时 race 一个独立的 timer，避免最终卡在
-      // Cypress 的外层 cy.then() 超时（host.js:414）。
-      const timeoutMs = Math.max(1_000, CY_GOAL_TIMEOUT_MS);
-      const timeoutPromise = new Promise<{ timedOut: true }>((resolve) => {
-        timeoutTimer = setTimeout(() => {
-          controller.abort();
-          resolve({ timedOut: true });
-        }, Math.max(1_000, timeoutMs - 1_000));
-      });
-      const outcome = await Promise.race([
-        reactPromise.then((result) => ({ timedOut: false as const, result })),
-        timeoutPromise,
-      ]);
-      if (!('result' in outcome)) {
-        // 让仍在收尾的 reactLoop 在后台观察 abort；当前 goal 立即返回，
-        // 后续由 keveGoal 记录 blocked，而不是继续占用 Cypress 的测试回调。
-        void reactPromise.catch(() => undefined);
-        return {
-          expectedMet: false,
-          conclusion: 'blocked',
-          actions: [{
-            action: {
-              tool: 'done',
-              verdict: 'blocked',
-              text: `Agent timed out after ${timeoutMs}ms`,
-            },
-            toolOutput: '',
-            result: 'ok',
-          }],
-          finalSnapshot: '',
-          agentScreenshots: [],
-        };
-      }
-      const result = outcome.result;
+      const result = await reactPromise;
 
       /**
        * Cypress 侧 reactLoop 的原生页面事件监听不会产生数据（CyAgentPage 不派发
@@ -293,7 +255,6 @@ function installGoalExplorer(engine: CypressEngine, bridge: ReturnType<typeof cr
         diagnostics,
       };
     } finally {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
       page.dispose();
     }
   });

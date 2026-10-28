@@ -288,6 +288,24 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
   const keveScreenshots = parseKeveScreenshotLabels(attachments);
 
   if (skipAI) {
+    // fn 断言失败 + Agent 复核通过：ReAct done(pass) 必带完成时截图（有据可查），
+    // 语义验证成立时按「通过（AI 复核）」处理——fn 精确断言常因空格/全半角等
+    // 格式差异误杀语义正确的执行；断言文本差异由期望回填机制修正。
+    // 无截图证据的 Agent pass 不享受此待遇，维持阻塞判定（防幻觉假绿）。
+    if (effectiveCategory === 'pass' && steps.some((s: any) => s?.screenshotPath)) {
+      const record: ConfidenceRecord = {
+        title: input.title,
+        data: '通过（AI复核）',
+        confidence: 0.75,
+        thought: `fn 断言与真实页面存在差异（${classifiedMessage}），但 Agent 复核带完成时截图确认期望状态语义达成——按通过（AI 复核）处理；断言文本与真实 UI 存在格式差异，建议回填修正。`,
+        errorCategory: 'pass',
+        ...(keveScreenshots.length > 0 ? { keveScreenshots } : {}),
+        steps,
+        diagnosticHint,
+        diagnostics,
+      };
+      return { record, skipAI: true, log: 'SHORT-CIRCUIT skipAI (category=pass, ai-review-pass)' };
+    }
     const thought = effectiveCategory === 'script'
       ? `脚本本身存在代码错误(${classifiedMessage})，测试结果无效`
       : effectiveCategory === 'env'

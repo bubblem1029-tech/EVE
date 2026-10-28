@@ -40,6 +40,43 @@ export interface CompiledStep {
 export interface CompileOutcome {
   dslList: CompiledStep[];
   skipped: Array<{ toolName: string; reason: string }>;
+  /** 传入原始用例 dslList 时，预期的迁移情况 */
+  expectationMigration?: ExpectationMigration;
+}
+
+/** 页面级预期迁移结果：migrated 为挂到候选末步的总条数，dropped 为无法可靠重定位的条数 */
+export interface ExpectationMigration {
+  migrated: number;
+  dropped: number;
+}
+
+/** 探索只捕获交互动作，预期不来自 agent；页面级断言（url/title，不挂元素链）可确定性补挂到候选末步 */
+function collectPageExpectations(originalDslList: unknown[]): { entries: Record<string, unknown>[]; dropped: number } {
+  const entries: Record<string, unknown>[] = [];
+  let dropped = 0;
+  for (const step of originalDslList || []) {
+    const list = Array.isArray((step as { expectation?: unknown } | null)?.expectation)
+      ? (step as { expectation: unknown[] }).expectation
+      : [];
+    for (const e of list) {
+      if (String((e as { type?: string }).type || '').toUpperCase() === 'EXPECTED__PAGET_VALUE') {
+        entries.push(e as Record<string, unknown>);
+      } else {
+        dropped += 1;
+      }
+    }
+  }
+  return { entries, dropped };
+}
+
+export function migratePageExpectations(originalDslList: unknown[], target: CompiledStep[]): ExpectationMigration {
+  const last = target[target.length - 1];
+  if (!last) return { migrated: 0, dropped: 0 };
+  const { entries, dropped } = collectPageExpectations(originalDslList);
+  const existing = Array.isArray(last.expectation) ? last.expectation : [];
+  const added = entries.filter((e) => !existing.some((x) => JSON.stringify(x) === JSON.stringify(e)));
+  if (added.length) last.expectation = [...existing, ...added];
+  return { migrated: existing.length + added.length, dropped };
 }
 
 const SUPPORTED = new Set(['navigate', 'click', 'type', 'pressKey', 'wait', 'select_option']);
@@ -50,7 +87,8 @@ function hopsToContext(hops?: DomChainHop[]): PlatformHop[] {
 }
 
 function stepText(kind: string, chain?: CapturedChain, extra?: string): string {
-  const target = chain?.describe || (chain?.hops.length ? hopsToContext(chain.hops).map((h) => h.value).join(' → ') : '') || extra || kind;
+  // extra 单独拼在末尾，不能落入 target（否则 OPEN_PAGE 会把 URL 拼两遍）
+  const target = chain?.describe || (chain?.hops.length ? hopsToContext(chain.hops).map((h) => h.value).join(' → ') : '');
   return `${kind}${target ? ' ' + target : ''}${extra ? ' ' + extra : ''}`;
 }
 
@@ -76,6 +114,11 @@ export function compileActionsToDsl(actions: MissionAction[]): CompileOutcome {
     if (toolName === 'navigate') {
       const url = String(action.url || action.toolInput?.url || '');
       if (!url) { skipped.push({ toolName, reason: 'navigate 缺 url' }); continue; }
+      // 探索前脚本自身的 page.goto 已合成 OPEN_PAGE 时，agent 对同一地址的重复导航不再生成第二步
+      const last = dslList[dslList.length - 1];
+      if (last && last.operation === 'OPEN_PAGE' && String((last.value as { value?: unknown } | undefined)?.value) === url) {
+        continue;
+      }
       dslList.push({
         text: stepText('打开页面', undefined, url),
         operation: 'OPEN_PAGE',
@@ -136,12 +179,17 @@ export function compileActionsToDsl(actions: MissionAction[]): CompileOutcome {
   return { dslList, skipped };
 }
 
-/** 组装成与本地基线同形的 execution input（cases[0].dslList），便于直接进候选/验证链路 */
+/** 组装成与本地基线同形的 execution input（cases[0].dslList），便于直接进候选/验证链路。
+ * meta.originalDslList 传入原始用例 DSL 时，把页面级预期（EXPECTED__PAGET_VALUE）迁移到候选末步。 */
 export function buildCandidateInput(
   compiled: CompileOutcome,
-  meta: { projectId: number | string; stepGroupId: number | string; caseName: string },
+  meta: { projectId: number | string; stepGroupId: number | string; caseName: string; originalDslList?: unknown[] },
 ): { cases: Array<Record<string, unknown>>; projectId: string; source?: string } & Record<string, unknown> {
   if (!compiled.dslList.length) throw new Error('探索结果无可编译步骤，拒绝生成空候选');
+  const expectationMigration = Array.isArray(meta.originalDslList) && meta.originalDslList.length
+    ? migratePageExpectations(meta.originalDslList, compiled.dslList)
+    : undefined;
+  if (expectationMigration) compiled.expectationMigration = expectationMigration;
   return {
     projectId: String(meta.projectId),
     cases: [

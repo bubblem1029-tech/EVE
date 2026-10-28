@@ -14,8 +14,48 @@ describe('compileActionsToDsl', () => {
     ]);
     expect(out.dslList).toHaveLength(1);
     expect(out.dslList[0].operation).toBe('OPEN_PAGE');
+    expect(out.dslList[0].text).toBe('打开页面 https://kwaibi.corp.kuaishou.com/visual');
     expect((out.dslList[0].value as { type: string; value: string }).value).toContain('visual');
     expect(out.skipped).toHaveLength(0);
+  });
+
+  it('连续 navigate 同一地址不重复生成 OPEN_PAGE', () => {
+    const url = 'https://kwaibi.corp.kuaishou.com/visual';
+    const out = compileActionsToDsl([
+      { toolName: 'navigate', toolInput: { url }, url },
+      { toolName: 'navigate', toolInput: { url }, url },
+      { toolName: 'click', toolInput: { ref: 'a' }, chain: chain('按钮', [{ kind: 'text', value: '查询' }]) },
+    ]);
+    expect(out.dslList.map((s) => s.operation)).toEqual(['OPEN_PAGE', 'CLICK_ELEMENT']);
+  });
+
+  it('隔了交互步骤后回到同一地址，视为真实二次跳转仍生成', () => {
+    const url = 'https://kwaibi.corp.kuaishou.com/visual';
+    const out = compileActionsToDsl([
+      { toolName: 'navigate', toolInput: { url }, url },
+      { toolName: 'click', toolInput: { ref: 'a' }, chain: chain('按钮', [{ kind: 'text', value: '查询' }]) },
+      { toolName: 'navigate', toolInput: { url }, url },
+    ]);
+    expect(out.dslList.map((s) => s.operation)).toEqual(['OPEN_PAGE', 'CLICK_ELEMENT', 'OPEN_PAGE']);
+  });
+
+  it('不同地址的 navigate 仍各生成一步', () => {
+    const out = compileActionsToDsl([
+      { toolName: 'navigate', toolInput: {}, url: 'https://a.example.com' },
+      { toolName: 'navigate', toolInput: {}, url: 'https://b.example.com' },
+    ]);
+    expect(out.dslList).toHaveLength(2);
+  });
+
+  it('chain.describe 存在时用它生成可读步骤文本', () => {
+    const out = compileActionsToDsl([
+      {
+        toolName: 'click',
+        toolInput: { ref: 'f5e13' },
+        chain: chain('数据集负责人', [{ kind: 'class', value: 'owner-icon' }]),
+      },
+    ]);
+    expect(out.dslList[0].text).toBe('点击 数据集负责人');
   });
 
   it('编译 click → CLICK_ELEMENT 且保留稳定定位链', () => {
@@ -81,5 +121,43 @@ describe('compileActionsToDsl', () => {
     const first = input.cases[0] as { stepGroupId: number; dslList: unknown[] };
     expect(first.stepGroupId).toBe(17);
     expect(first.dslList).toHaveLength(1);
+  });
+
+  it('buildCandidateInput 传入原始 dslList 时迁移页面级预期到末步', () => {
+    const compiled = compileActionsToDsl([
+      { toolName: 'click', toolInput: { ref: 'a' }, chain: chain('负责人', [{ kind: 'text', value: '负责人' }]) },
+      { toolName: 'click', toolInput: { ref: 'b' }, chain: chain('头像', [{ kind: 'class', value: 'avatar' }]) },
+    ]);
+    buildCandidateInput(compiled, {
+      projectId: 180,
+      stepGroupId: 55,
+      caseName: 'S55',
+      originalDslList: [
+        {
+          operation: 'CLICK_ELEMENT',
+          expectation: [
+            { type: 'EXPECTED__PAGET_VALUE', ctype: 'url', cexpression: 'include', value: { type: 'CUSTOM', value: 'username?username=x' }, context: [], text: '页面链接包含username' },
+            { type: 'ELEMENT_EXIST', context: [{ type: 'text', value: '某元素' }], text: '元素存在' },
+          ],
+        },
+      ],
+    });
+    const last = compiled.dslList[compiled.dslList.length - 1];
+    expect(last.expectation).toHaveLength(1);
+    expect(String((last.expectation[0] as { type: string }).type)).toBe('EXPECTED__PAGET_VALUE');
+    expect(compiled.expectationMigration).toEqual({ migrated: 1, dropped: 1 });
+  });
+
+  it('重复迁移同一页面级预期不叠加', () => {
+    const compiled = compileActionsToDsl([
+      { toolName: 'click', toolInput: { ref: 'a' }, chain: chain('负责人', [{ kind: 'text', value: '负责人' }]) },
+    ]);
+    const original = [
+      { operation: 'CLICK_ELEMENT', expectation: [{ type: 'EXPECTED__PAGET_VALUE', ctype: 'url', cexpression: 'include', value: { type: 'CUSTOM', value: 'username=x' } }] },
+    ];
+    buildCandidateInput(compiled, { projectId: '1', stepGroupId: 1, caseName: 'S1', originalDslList: original });
+    const first = JSON.stringify(compiled.dslList[0].expectation);
+    buildCandidateInput(compiled, { projectId: '1', stepGroupId: 1, caseName: 'S1', originalDslList: original });
+    expect(JSON.stringify(compiled.dslList[0].expectation)).toBe(first);
   });
 });

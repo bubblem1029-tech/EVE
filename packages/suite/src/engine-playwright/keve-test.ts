@@ -268,7 +268,6 @@ export const test = base.extend<KeveFixture>({
       const currentUrl = page.url();
       const learnedHint = learnedActions.getHint(options.step, currentUrl);
       let reactResult: any;
-      let reactTimedOut = false;
 
       if (fnBlocked) {
         // ── Shortcut: environment error detected in fn, skip Agent Re-Act entirely ──
@@ -341,15 +340,6 @@ export const test = base.extend<KeveFixture>({
             conclusion: 'pass' as const,
           };
         } else {
-        // ── Per-goal timeout: prevent one slow goal from exhausting the test timeout ──
-        // Default 300s per goal; total test timeout should be ≥ (goals × 300s + overhead)
-        const GOAL_TIMEOUT_MS = 300_000;
-        const goalTimeoutController = new AbortController();
-        const goalTimeout = setTimeout(() => {
-          goalTimeoutController.abort();
-          console.log(`[keveGoal] ⏰ "${options.step}" timed out after ${GOAL_TIMEOUT_MS}ms — stopping agent`);
-        }, GOAL_TIMEOUT_MS);
-
         try {
           reactResult = await reactLoop(
             page,
@@ -360,7 +350,6 @@ export const test = base.extend<KeveFixture>({
               specFilePath: ctx.specFilePath,
               fnSource,
               fnResult: fnError ? { error: fnError } : { success: true },
-              signal: goalTimeoutController.signal,
               goalScreenshotBefore: goalScreenshotBefore || undefined,
               fnAfterScreenshot: fnAfterScreenshot || undefined,
               targetUrl: process.env.KEVE_TARGET_URL || '',
@@ -371,22 +360,15 @@ export const test = base.extend<KeveFixture>({
             },
           );
         } catch (reactErr: any) {
-          reactTimedOut = true;
-          const isGoalTimeout = goalTimeoutController.signal.aborted;
-          const msg = isGoalTimeout
-            ? `Goal timed out (${GOAL_TIMEOUT_MS}ms)`
-            : (reactErr?.message || String(reactErr));
-          console.log(`[keveGoal] reactLoop interrupted: ${msg.slice(0, 200)}`);
+          console.log(`[keveGoal] reactLoop interrupted: ${(reactErr?.message || String(reactErr)).slice(0, 200)}`);
           reactResult = {
             expectedMet: false,
             actions: [],
             finalSnapshot: '',
             agentScreenshots: [],
-            conclusion: isGoalTimeout ? 'blocked' : 'fail',
+            conclusion: 'fail',
             diagnostics: undefined,
           };
-        } finally {
-          clearTimeout(goalTimeout);
         }
         } // end of page-alive else (agent Re-Act path)
         } // end of else (non-blocked path)
@@ -397,7 +379,10 @@ export const test = base.extend<KeveFixture>({
       // show 15px, so consistent") and override to pass, but 15px ≠ 16px is a definitive failure.
       // This is the per-goal equivalent of pipeline afterHook (case-gen-validate) —
       // deterministic check > LLM judgment.
-      if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError)) {
+      // 证据门：Agent done(pass) 必带完成时截图——有截图佐证的语义通过，不被 fn
+      // 精确断言的格式差异（空格/全半角等）覆盖为 FAIL；无证据仍维持覆盖防幻觉假绿。
+      const hasAgentEvidence = (reactResult.agentScreenshots?.length ?? 0) > 0;
+      if (fnError && !fnBlocked && reactResult.expectedMet && isAssertionFailure(fnError) && !hasAgentEvidence) {
         console.log(`[keveGoal] ⚠️ "${options.step}" Agent said PASS but fn had assertion failure — overriding to FAIL`);
         console.log(`[keveGoal]    fn assertion: ${fnError}`);
         reactResult.expectedMet = false;
@@ -411,7 +396,7 @@ export const test = base.extend<KeveFixture>({
         error: reactResult.expectedMet
           ? undefined
           : reactResult.conclusion === 'blocked'
-            ? new Error(`Blocked: ${fnBlocked ? fnError : (reactTimedOut ? `Agent 超时 (300000ms)` : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked'))}`)
+            ? new Error(`Blocked: ${fnBlocked ? fnError : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked')}`)
             : (fnErrorRaw instanceof ScreenshotDiffError)
               ? new Error(fnError) // 截图对比：保留带差异率/区块数/基线版本的结构化错误文案
               : (fnError && isAssertionFailure(fnError) && !fnBlocked)

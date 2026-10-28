@@ -38,6 +38,18 @@ import {
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
+/** Re-Act 循环的统一探索步数上限；可用 KEVE_MAX_STEPS 覆盖。 */
+const DEFAULT_AGENT_MAX_STEPS = 20;
+const AGENT_MAX_STEPS_ENV = 'KEVE_MAX_STEPS';
+
+type AgentEnvGetter = (name: string) => string | undefined;
+
+function resolveAgentMaxSteps(getEnv?: AgentEnvGetter): number {
+    const raw = getEnv?.(AGENT_MAX_STEPS_ENV) ?? '';
+    const parsed = Number.parseInt(String(raw), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_AGENT_MAX_STEPS;
+}
+
 export interface AgentStepEvent {
     type: 'step';
     stepIndex: number;
@@ -90,6 +102,7 @@ export interface AgentHooks {
 }
 
 export interface AgentOptions {
+    /** 探索上限；未传时缺省读 KEVE_MAX_STEPS，默认 20。 */
     maxSteps?: number;
     learnedActionsHint?: string;
     customSystemPrompt?: string;
@@ -272,11 +285,11 @@ export class KevePageAgent {
         options?: { maxSteps?: number; customSystemPrompt?: string; hooks?: AgentHooks } & AgentHostOptions,
     ) {
         this.page = page;
-        this.maxSteps = options?.maxSteps ?? 8;
+        this.getEnvFn = options?.getEnv || (() => '');
+        this.maxSteps = options?.maxSteps ?? resolveAgentMaxSteps(this.getEnvFn);
         this.systemPrompt = options?.customSystemPrompt || SYSTEM_PROMPT;
         this.hooks = options?.hooks;
 
-        this.getEnvFn = options?.getEnv || (() => '');
         this.targetUrl = options?.targetUrl || this.getEnvFn('KEVE_TARGET_URL') || '';
         this.saveScreenshotFn = options?.saveScreenshot;
         this.loadInitialImagesFn = options?.loadInitialImages;
@@ -1139,7 +1152,7 @@ export async function reactLoop(
     agentScreenshots?: string[];
 }> {
     const agent = new KevePageAgent(toAgentPage(page), {
-        maxSteps: options.maxSteps ?? 20,
+        maxSteps: options.maxSteps ?? resolveAgentMaxSteps(options.getEnv),
         systemPrompt: options.systemPrompt,
         targetUrl: options.targetUrl,
         getEnv: options.getEnv,
