@@ -17,9 +17,11 @@ import { LLM_CALL_START, LLM_CALL_END } from './events'
 import type { LLMCallStartDetail, LLMCallEndDetail, LLMCallMethod } from './events'
 import type { ChatResult, ContentItem, InvokeOptions, InvokeResult, LLMClient, LLMConfig, Message, Tool } from './types'
 import { modelPatch, parseXMLExtractionResponse, extractXMLTag } from './utils'
+import { isContextLengthError } from './budget'
 
 export { InvokeError, InvokeErrorType }
 export { parseXMLExtractionResponse, extractXMLTag }
+export { estimateTextTokens, estimateRequestTokens } from './budget'
 export type { ChatResult, ContentItem, InvokeOptions, InvokeResult, LLMClient, LLMConfig, Message, Tool }
 export { LLM_CALL_START, LLM_CALL_END }
 export type { LLMCallStartDetail, LLMCallEndDetail, LLMCallMethod }
@@ -37,6 +39,10 @@ export function parseLLMConfig(config: LLMConfig): Required<LLMConfig> {
 		maxRetries: config.maxRetries ?? LLM_MAX_RETRIES,
 		disableNamedToolChoice: config.disableNamedToolChoice ?? false,
 		customFetch: (config.customFetch ?? fetch).bind(globalThis),
+		contextWindowTokens: config.contextWindowTokens ?? 0,
+		maxOutputTokens: config.maxOutputTokens ?? 1024,
+		contextSafetyTokens: config.contextSafetyTokens ?? 512,
+		imageTokens: config.imageTokens ?? 4096,
 	}
 }
 
@@ -120,6 +126,7 @@ export class LLM extends EventTarget {
 		}
 
 		modelPatch(requestBody)
+			; (this.client as OpenAIClient).checkBudget(requestBody)
 
 		try {
 			const response = await this.config.customFetch(`${this.config.baseURL}/chat/completions`, {
@@ -138,6 +145,12 @@ export class LLM extends EventTarget {
 			}
 
 			const data = await response.json()
+			if (isContextLengthError(data)) {
+				throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, 'Model input exceeds deployed context capacity', undefined, data)
+			}
+			if (!data.choices?.length || data.choices[0].finish_reason === 'error') {
+				throw new InvokeError(InvokeErrorType.SERVER_ERROR, 'Model returned no valid chat completion', undefined, data)
+			}
 			const content = data.choices?.[0]?.message?.content || ''
 
 			const usage = {

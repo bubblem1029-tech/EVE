@@ -17,6 +17,7 @@
  */
 
 import { LLM, type Message, type ContentItem, type Tool } from '@kkeve/core/llm';
+import { COMPACT_SYSTEM_PROMPT, fitContext, recordedClickTarget, clickMatchesTarget, canHandOffRecordedClick } from './context-budget.js';
 import { z } from 'zod';
 import { inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
 import { /* scriptRefine, */ extractDiagnosticHints } from './hooks.js';
@@ -306,6 +307,19 @@ export class KevePageAgent {
             temperature: 0.1,
             maxRetries: 3,
             customFetch: llmConfig.customFetch,
+            contextWindowTokens: Number(this.getEnvFn('KEVE_CONTEXT_WINDOW_TOKENS')) || 0,
+            maxOutputTokens: Number(this.getEnvFn('KEVE_LLM_MAX_OUTPUT_TOKENS')) || 1024,
+            contextSafetyTokens: Number(this.getEnvFn('KEVE_CONTEXT_SAFETY_TOKENS')) || 512,
+            imageTokens: Number(this.getEnvFn('KEVE_CONTEXT_IMAGE_TOKENS')) || 4096,
+        });
+        this.llm.addEventListener('error', (event: Event) => {
+            const error = (event as CustomEvent).detail?.error;
+            const usage = error?.rawResponse?.usage;
+            if (usage) this.recordAiUsage({ promptTokens: usage.prompt_tokens ?? 0,
+                completionTokens: usage.completion_tokens ?? 0, totalTokens: usage.total_tokens ?? 0 });
+            console.log('[LLMAttemptError]', JSON.stringify({ type: error?.type,
+                usage: usage ?? null, responseId: error?.rawResponse?.id,
+                finishReason: error?.rawResponse?.choices?.[0]?.finish_reason }));
         });
     }
 
@@ -477,7 +491,11 @@ export class KevePageAgent {
         }
 
         const maxSteps = options?.maxSteps ?? this.maxSteps;
-        const systemPrompt = options?.customSystemPrompt || this.systemPrompt;
+        const budgeted = this.llm.config.contextWindowTokens > 0;
+        const systemPrompt = options?.customSystemPrompt || (budgeted && this.systemPrompt === SYSTEM_PROMPT
+            ? COMPACT_SYSTEM_PROMPT + '\nAvailable actions:\n' + Array.from(tools.entries()).map(([name, t]) =>
+                `${name}(${Object.keys(getZodShape(t.inputSchema)).join(',')}): ${t.description.slice(0, 160)}`).join('\n')
+            : this.systemPrompt);
 
         // Inject context/learned hints as initial observations
         const targetUrl = this.targetUrl;
@@ -519,9 +537,21 @@ export class KevePageAgent {
                     console.log(`  url: ${url.slice(0, 120)} | step ${stepCount + 1}/${maxSteps}`);
 
                     // ── Assemble messages (text-only per step; initial screenshots on step 0) ──
-                    const userText = this.assembleUserPrompt(step, expected, snapshot, url, stepCount, maxSteps);
+                    let userText = this.assembleUserPrompt(step, expected, snapshot, url, stepCount, maxSteps);
+                    const macroTool = this.buildMacroTool();
+                    if (budgeted) {
+                        const inputBudget = this.llm.config.contextWindowTokens - this.llm.config.maxOutputTokens - this.llm.config.contextSafetyTokens;
+                        const wireTools = Object.entries(macroTool).map(([name, t]) => ({
+                            type: 'function', function: { name, description: t.description,
+                                parameters: t.customJsonSchema || z.toJSONSchema(t.inputSchema, { target: 'openapi-3.0' }) },
+                        }));
+                        const fitted = fitContext(systemPrompt, userText, wireTools, inputBudget);
+                        console.log('[AgentContext]', JSON.stringify({ step: stepCount, originalChars: userText.length,
+                            sentChars: fitted.user.length, estimatedTokens: fitted.estimatedTokens, inputBudget, partial: fitted.partial }));
+                        userText = fitted.user;
+                    }
                     let userContent: string | ContentItem[];
-                    if (stepCount === 0) {
+                    if (stepCount === 0 && !budgeted) {
                         const initialImages = await this.loadInitialScreenshots(options);
                         userContent = initialImages.length > 0
                             ? [{ type: 'text', text: userText }, ...initialImages]
@@ -536,7 +566,6 @@ export class KevePageAgent {
 
                     // ── Think + Act: LLM decides ──
                     console.log('\x1b[34m\x1b[1m🧠 Thinking...\x1b[0m');
-                    const macroTool = this.buildMacroTool();
 
                     const llmStartedAt = Date.now();
                     let llmResult: Awaited<ReturnType<typeof this.llm.invoke>>;
@@ -615,6 +644,24 @@ export class KevePageAgent {
                         this.pushObservation(jsRulesHint);
                     }
 
+                    // A recorded click-only step has no further business assertion.
+                    // Once the exact intended target was clicked successfully, return
+                    // control to the script instead of letting the model execute the
+                    // next step (e.g. confirming a dataset switch) ahead of schedule.
+                    if (actionName === 'click' && !execResult.error && options?.fnResult?.error &&
+                        canHandOffRecordedClick(expected, options.fnSource || '', snapshot,
+                            typeof macroInput.ref === 'string' ? macroInput.ref : undefined)) {
+                        const after = await this.page.ariaSnapshot({ mode: 'ai' });
+                        try {
+                            const shot = await this.page.screenshot({ type: 'png', timeout: 15000 });
+                            stepEvent.screenshotPath = await this.saveScreenshotBuffer(shot.base64, stepCount, 'recorded-click-handoff');
+                        } catch { /* screenshot evidence is best-effort, as for done */ }
+                        taskResult = this.buildResult(true, `Recorded target clicked successfully: ${recordedClickTarget(options.fnSource || '')}`, stepCount + 1, after);
+                        (taskResult as any).conclusion = 'pass';
+                        console.log('[AgentHandoff] Exact recorded click completed; returning to deterministic next step');
+                        break;
+                    }
+
                     // ── Check: if "done", capture done-time screenshot + return with test conclusion ──
                     if (actionName === 'done') {
                         // Capture done-time screenshot as goal-after evidence
@@ -640,10 +687,18 @@ export class KevePageAgent {
                             } else {
                                 // Level 4: parse text for verdict keyword (LLM often puts verdict in text)
                                 conclusion = inferConclusionFromDoneText(actionInput?.text)
-                                    || (String(actionInput?.text || '').trim() ? 'pass' : 'fail');
+                                    || 'blocked';
                             }
                         }
-                        const data = String(actionInput?.text || { pass: 'Goal achieved', fail: 'Expected not achieved', blocked: 'Blocked' }[conclusion]);
+                        let data = String(actionInput?.text || { pass: 'Goal achieved', fail: 'Expected not achieved', blocked: 'Blocked' }[conclusion]);
+                        const target = /点击|click/i.test(step) && options?.fnResult?.error
+                            ? recordedClickTarget(options.fnSource || '') : undefined;
+                        if (conclusion === 'pass' && target && !this.events.some(event =>
+                            event.type === 'step' && event.toolName === 'click' && !event.toolError &&
+                            typeof event.toolInput?.ref === 'string' && clickMatchesTarget(event.snapshot, event.toolInput.ref, target, options.fnSource || ''))) {
+                            conclusion = 'blocked';
+                            data = `Recorded click target "${target}" has no verified click evidence; refusing a substituted-target pass`;
+                        }
                         const success = conclusion === 'pass';
                         console.log(`\x1b[32m\x1b[1mTask completed\x1b[0m ${conclusion} ${data}`);
                         taskResult = this.buildResult(success, data, stepCount, snapshot);
@@ -663,6 +718,13 @@ export class KevePageAgent {
                         taskResult = this.buildResult(false, message, stepCount);
                         break;
                     }
+                    // invoke() has already exhausted transport retries. A new page step
+                    // cannot repair model/auth/capacity failures and only amplifies them.
+                    if (err?.name === 'InvokeError') {
+                        taskResult = this.buildResult(false, `Model infrastructure error (${err.type}): ${err.message}`, stepCount);
+                        (taskResult as any).conclusion = 'blocked';
+                        break;
+                    }
                 } finally {
                     console.groupEnd();
                     // ── onAfterStep hook (runs even on error/abort) ──
@@ -680,6 +742,14 @@ export class KevePageAgent {
                     .slice(-4);
                 if (recentSteps.length >= 3) {
                     const last3 = recentSteps.slice(-3);
+                    // Repeated window scrolling cannot expose a target when the
+                    // observed page never changes. End instead of spending all
+                    // remaining calls on the same ineffective action.
+                    if (last3.every(s => s.toolName === 'scroll' && s.snapshot === last3[0].snapshot)) {
+                        taskResult = this.buildResult(false, 'No page progress after 3 scroll actions; target remains unverified', stepCount, last3[2].snapshot);
+                        (taskResult as any).conclusion = 'blocked';
+                        break;
+                    }
                     const normalize = (s: string) => (s || '').replace(/executed for \d+ms/, '').slice(0, 80);
                     const outputs = last3.map(s => normalize(s.toolOutput));
                     const allSame = outputs.every(o => o === outputs[0]);
@@ -838,6 +908,10 @@ export class KevePageAgent {
         prompt += '<user_request>\n';
         prompt += `Step: ${step}\n`;
         prompt += `Expected: ${expected}\n`;
+        const recordedTarget = this.options?.fnResult?.error ? recordedClickTarget(this.options?.fnSource || '') : undefined;
+        if (recordedTarget && /点击|click/i.test(step)) {
+            prompt += `Recorded click target (exact): ${JSON.stringify(recordedTarget)}. Do not substitute another item. Use its current ref and report blocked if unavailable.\n`;
+        }
         prompt += '</user_request>\n';
         // <prior_execution>: deterministic fn script result (if fn was provided)
         if (this.options?.fnResult && (this.options.fnResult.success || this.options.fnResult.error)) {
@@ -850,7 +924,7 @@ export class KevePageAgent {
             prompt += `<prior_execution>\nA deterministic script was executed BEFORE your Re-Act loop.\n${resultLine}${sourceLine}\n</prior_execution>\n`;
         }
         // <initial_screenshots>: only on first step, describe the before/after fn screenshots
-        if (stepIndex === 0 && (this.options?.goalScreenshotBefore || this.options?.fnAfterScreenshot)) {
+        if (stepIndex === 0 && !this.llm.config.contextWindowTokens && (this.options?.goalScreenshotBefore || this.options?.fnAfterScreenshot)) {
             prompt += '<initial_screenshots>\n';
             if (this.options?.goalScreenshotBefore) {
                 prompt += 'goal-before: Screenshot of the page state BEFORE any test action (fn执行前的页面原始状态).\n';
@@ -909,6 +983,12 @@ export class KevePageAgent {
             AgentOutput: {
                 description: 'You MUST call this tool every step! Output your reflection and action.',
                 inputSchema: schema,
+                // Descriptions duplicate the action guide and dominate small windows.
+                // Preserve types/enums/validation, shorten only prose on the wire.
+                ...(this.llm.config.contextWindowTokens > 0 ? { customJsonSchema: JSON.parse(JSON.stringify(
+                    z.toJSONSchema(schema, { target: 'openapi-3.0' }),
+                    (key, value) => key === 'description' && typeof value === 'string' ? value.slice(0, 64) : value,
+                )) } : {}),
                 execute: async (input: MacroToolInput): Promise<{ toolName: string; output: string; error?: string; duration?: number }> => {
                     signal.throwIfAborted();
 
@@ -1145,6 +1225,7 @@ export async function reactLoop(
 ): Promise<{
     actions: any[];
     expectedMet: boolean;
+    failureReason?: string;
     conclusion?: 'pass' | 'fail' | 'blocked';
     finalSnapshot: string;
     diagnostics?: RuntimeDiagnostics;
@@ -1251,6 +1332,7 @@ export async function reactLoop(
     return {
         actions,
         expectedMet: result.success,
+        failureReason: result.success ? undefined : result.data,
         conclusion: (result as any).conclusion,
         finalSnapshot: result.finalSnapshot,
         diagnostics: result.diagnostics,

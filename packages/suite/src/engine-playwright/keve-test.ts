@@ -396,7 +396,7 @@ export const test = base.extend<KeveFixture>({
         error: reactResult.expectedMet
           ? undefined
           : reactResult.conclusion === 'blocked'
-            ? new Error(`Blocked: ${fnBlocked ? fnError : (reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked')}`)
+            ? new Error(`Blocked: ${fnBlocked ? fnError : (reactResult.failureReason || reactResult.actions?.filter((a: any) => a.action?.tool === 'done').pop()?.action?.text || 'Agent blocked')}`)
             : (fnErrorRaw instanceof ScreenshotDiffError)
               ? new Error(fnError) // 截图对比：保留带差异率/区块数/基线版本的结构化错误文案
               : (fnError && isAssertionFailure(fnError) && !fnBlocked)

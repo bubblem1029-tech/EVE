@@ -56,7 +56,7 @@ const DEFAULT_CONFIG: KeveConfig = {
     current_round: 0,
   },
   llm: {
-    model: process.env.KEVE_LLM_MODEL || '',
+    model: process.env.KEVE_LLM_MODEL_NAME || process.env.KEVE_LLM_MODEL || '',
     base_url: process.env.KEVE_LLM_BASE_URL || process.env.KONSTRUCTOR_API_BASE || '',
     api_key: process.env.KEVE_LLM_API_KEY || process.env.LLM_API_KEY || '',
   },

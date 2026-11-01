@@ -45,15 +45,15 @@ export function resolveEngineBin({ engine, backendRoot, suiteRoot }: ResolveEngi
   // suite 自带 .bin（workspace/link 安装）时优先；平台由 backend 安装、suite 无 .bin 时自然回退 backendRoot。
   const candidates = engine === 'cypress'
     ? [
-        envVar,
-        path.join(backendRoot, 'node_modules', '.bin', binName),
-        path.join(suiteRoot, 'node_modules', '.bin', binName),
-      ]
+      envVar,
+      path.join(backendRoot, 'node_modules', '.bin', binName),
+      path.join(suiteRoot, 'node_modules', '.bin', binName),
+    ]
     : [
-        envVar,
-        path.join(suiteRoot, 'node_modules', '.bin', binName),
-        path.join(backendRoot, 'node_modules', '.bin', binName),
-      ];
+      envVar,
+      path.join(suiteRoot, 'node_modules', '.bin', binName),
+      path.join(backendRoot, 'node_modules', '.bin', binName),
+    ];
   const valid = candidates.filter(Boolean) as string[];
   return valid.find((candidate) => fs.existsSync(candidate)) || valid[0];
 }

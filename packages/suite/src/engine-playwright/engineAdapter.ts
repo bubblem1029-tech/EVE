@@ -170,10 +170,18 @@ export class PlaywrightEngine implements EngineAdapter {
     await locator.first().dblclick();
   }
 
-  async forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
-    await locator.first().click({ force: true });
-  }
+    async forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+        const locator = this.resolve(refs);
+        const first = locator.first();
+        const box = await first.boundingBox().catch(() => null);
+        if (!box || box.width === 0 || box.height === 0) {
+            // 0×0 元素（伪元素渲染的可点区，如视频弹窗关闭 ×）：坐标点击必然落空，
+            // 直接对宿主派发 JS click（录制时记录的正是对该元素的事件点击）。
+            await first.evaluate((el) => (el as HTMLElement).click());
+            return;
+        }
+        await first.click({ force: true });
+    }
 
   async clear(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolveInteractive(refs);

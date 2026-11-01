@@ -133,4 +133,10 @@ export interface LLMConfig {
 	maxRetries?: number
 	disableNamedToolChoice?: boolean
 	customFetch?: typeof globalThis.fetch
+	/** Actual deployed context capacity. Zero disables the optional budget guard. */
+	contextWindowTokens?: number
+	maxOutputTokens?: number
+	contextSafetyTokens?: number
+	/** Conservative per-image allowance; use a model-specific value when known. */
+	imageTokens?: number
 }

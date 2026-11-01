@@ -11,6 +11,7 @@ import * as z from 'zod/v4'
 import { InvokeError, InvokeErrorType } from './errors'
 import type { ChatResult, InvokeOptions, InvokeResult, LLMClient, LLMConfig, Message, Tool } from './types'
 import { modelPatch, zodToOpenAITool } from './utils'
+import { estimateRequestTokens, isContextLengthError } from './budget'
 
 /**
  * Client for OpenAI compatible APIs
@@ -18,6 +19,23 @@ import { modelPatch, zodToOpenAITool } from './utils'
 export class OpenAIClient implements LLMClient {
 	config: Required<LLMConfig>
 	private fetch: typeof globalThis.fetch
+	checkBudget(body: Record<string, unknown>): void {
+		const capacity = this.config.contextWindowTokens;
+		if (!capacity) return;
+		const output = this.config.maxOutputTokens;
+		const safety = this.config.contextSafetyTokens;
+		if (![capacity, output, safety, this.config.imageTokens].every(Number.isFinite)
+			|| capacity <= 0 || output <= 0 || safety < 0 || this.config.imageTokens <= 0) {
+			throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, 'Invalid context budget configuration');
+		}
+		body.max_tokens = output;
+		const estimated = estimateRequestTokens(body, this.config.imageTokens);
+		console.log('[ContextBudget]', JSON.stringify({ estimatedInputTokens: estimated, capacity, output, safety }));
+		if (estimated + output + safety > capacity) {
+			throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH,
+				`Context budget exceeded before request: input≈${estimated}, output=${output}, safety=${safety}, capacity=${capacity}`);
+		}
+	}
 
 	constructor(config: Required<LLMConfig>) {
 		this.config = config
@@ -65,6 +83,7 @@ export class OpenAIClient implements LLMClient {
 		}
 
 		modelPatch(requestBody)
+		this.checkBudget(requestBody)
 
 		// 2. Call API
 		let response: Response
@@ -87,7 +106,10 @@ export class OpenAIClient implements LLMClient {
 
 		// 3. Handle HTTP errors
 		if (!response.ok) {
-			const errorData = await response.json().catch()
+			const errorData = await response.json().catch(() => ({ error: { message: response.statusText } }))
+			if (isContextLengthError(errorData)) {
+				throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, 'Model input exceeds deployed context capacity', undefined, errorData)
+			}
 			const errorMessage =
 				(errorData as { error?: { message?: string } }).error?.message || response.statusText
 
@@ -105,6 +127,9 @@ export class OpenAIClient implements LLMClient {
 
 		// 4. Parse and validate response
 		const data = await response.json()
+		if (isContextLengthError(data)) {
+			throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, 'Model input exceeds deployed context capacity', undefined, data)
+		}
 
 		const choice = data.choices?.[0]
 		if (!choice) {
@@ -132,62 +157,7 @@ export class OpenAIClient implements LLMClient {
 		// Get tool name from response
 		const toolCallName = normalizedChoice?.message?.tool_calls?.[0]?.function?.name
 		if (!toolCallName) {
-			// When LLM returns no valid tool_call (finish_reason: 'stop', empty tool_calls, etc.),
-			// treat it as a graceful fallback rather than throwing an error.
-			const textContent = normalizedChoice?.message?.content
-			// Try to find a suitable tool for synthetic call:
-			// 1. Prefer "done" or "AgentOutput" (main loop tools)
-			// 2. Fall back to the first available tool (sub-tool calls like VerifyResult)
-			const doneTool = tools['done'] || tools['AgentOutput'] || Object.values(tools)[0]
-			if (doneTool) {
-				// For "done"/"AgentOutput", wrap as { text, success }
-				// For other tools, try to parse textContent as JSON; fallback to minimal valid input
-				let syntheticArgs: unknown
-				const toolName = doneTool === tools['done'] ? 'done'
-					: doneTool === tools['AgentOutput'] ? 'AgentOutput'
-						: Object.keys(tools)[0]
-
-				if (toolName === 'done' || toolName === 'AgentOutput') {
-					syntheticArgs = { text: textContent || '', success: true }
-				} else {
-					// Try to extract JSON from the text content (LLM sometimes outputs JSON in text)
-					if (textContent) {
-						const jsonMatch = textContent.match(/\{[\s\S]*\}/)
-						if (jsonMatch) {
-							try { syntheticArgs = JSON.parse(jsonMatch[0]) } catch { syntheticArgs = {} }
-						} else {
-							syntheticArgs = {}
-						}
-					} else {
-						syntheticArgs = {}
-					}
-				}
-
-				const validation = doneTool.inputSchema.safeParse(syntheticArgs)
-				const toolInput = validation.success ? validation.data : syntheticArgs
-				let toolResult: unknown
-				try {
-					toolResult = validation.success ? await doneTool.execute(toolInput) : toolInput
-				} catch {
-					toolResult = toolInput
-				}
-				return {
-					toolCall: {
-						name: toolName,
-						args: toolInput,
-					},
-					toolResult,
-					usage: {
-						promptTokens: data.usage?.prompt_tokens ?? 0,
-						completionTokens: data.usage?.completion_tokens ?? 0,
-						totalTokens: data.usage?.total_tokens ?? 0,
-						cachedTokens: data.usage?.prompt_tokens_details?.cached_tokens,
-						reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens,
-					},
-					rawResponse: data,
-				}
-			}
-			throw new InvokeError(InvokeErrorType.NO_TOOL_CALL, 'No tool call found in response', undefined, data)
+			throw new InvokeError(InvokeErrorType.NO_TOOL_CALL, 'No valid tool call; task completion cannot be inferred from text', undefined, data)
 		}
 
 		const tool = tools[toolCallName]
@@ -358,6 +328,7 @@ export class OpenAIClient implements LLMClient {
 		}
 
 		modelPatch(requestBody)
+		this.checkBudget(requestBody)
 
 		// Call API
 		let response: Response
@@ -380,7 +351,10 @@ export class OpenAIClient implements LLMClient {
 
 		// Handle HTTP errors (same as invoke)
 		if (!response.ok) {
-			const errorData = await response.json().catch()
+			const errorData = await response.json().catch(() => ({ error: { message: response.statusText } }))
+			if (isContextLengthError(errorData)) {
+				throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, "Model input exceeds deployed context capacity", undefined, errorData)
+			}
 			const errorMessage =
 				(errorData as { error?: { message?: string } }).error?.message || response.statusText
 			if (response.status === 401 || response.status === 403) {
@@ -397,11 +371,23 @@ export class OpenAIClient implements LLMClient {
 
 		// Parse response and extract full assistant message
 		const data = await response.json()
+		if (isContextLengthError(data)) {
+			throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, "Model input exceeds deployed context capacity", undefined, data)
+		}
 		const choice = data.choices?.[0]
 		if (!choice) {
 			throw new InvokeError(InvokeErrorType.UNKNOWN, 'No choices in response', data)
 		}
 
+		if (choice.finish_reason === 'error') {
+			throw new InvokeError(InvokeErrorType.SERVER_ERROR, 'Model returned finish_reason=error (cause unspecified)', undefined, data)
+		}
+		if (choice.finish_reason === 'length') {
+			throw new InvokeError(InvokeErrorType.CONTEXT_LENGTH, 'Model output truncated', undefined, data)
+		}
+		if (choice.finish_reason === 'content_filter') {
+			throw new InvokeError(InvokeErrorType.CONTENT_FILTER, 'Model output filtered', undefined, data)
+		}
 		// Build the assistant Message from the response
 		const assistantMessage: Message = {
 			role: 'assistant',

@@ -20,7 +20,9 @@ declare module '@kkeve/core/llm' {
     toolCalls?: any[];
     [key: string]: any;
   }
-  export class LLM {
+  export function estimateRequestTokens(body: Record<string, any>, imageTokens?: number): number;
+  export class LLM extends EventTarget {
+    config: { contextWindowTokens: number; maxOutputTokens: number; contextSafetyTokens: number; imageTokens: number };
     constructor(options: any);
     invoke(messages: Message[], tools?: Tool[] | Record<string, Tool>, signal?: any, options?: any): Promise<ToolCallResult>;
     chat(messages: Message[], options?: any): Promise<any>;
