@@ -27,7 +27,10 @@ export interface Bridge {
 }
 
 export function createBridge(): Bridge {
-  const port = (globalThis as any).Cypress?.env?.('KEVE_BRIDGE_PORT');
+  const runtime = (globalThis as any).Cypress;
+  const port = typeof runtime?.expose === 'function'
+    ? runtime.expose('KEVE_BRIDGE_PORT')
+    : runtime?.env?.('KEVE_BRIDGE_PORT');
   if (!port) throw new Error('[cypress-engine] KEVE_BRIDGE_PORT 未注入：请确认 cypress.config 使用了 @kkeve/suite/engine-cypress 的 setupKeveBridge');
   const base = `http://127.0.0.1:${port}`;
   return {

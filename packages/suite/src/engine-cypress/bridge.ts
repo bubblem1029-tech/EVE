@@ -7,7 +7,7 @@
  * 服务，浏览器侧用 `fetch` 直接 await —— 这是唯一可靠的同步通道。
  *
  * 端口经 `config.env.KEVE_BRIDGE_PORT` 注入 spec，spec 内用
- * `Cypress.env('KEVE_BRIDGE_PORT')` 取。
+ * `Cypress.expose('KEVE_BRIDGE_PORT')` 取。
  *
  * 报告一致性：本模块与 keve-report.ts 写同一份 confidence-data.jsonl 与
  * report-data.json，并且都调用 core/confidence.ts 的分类与
@@ -716,7 +716,7 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
   });
   const port = (server.address() as any)?.port;
   /**
-   * 浏览器侧要从 `Cypress.env()` 读到的运行时配置。
+   * 浏览器侧公开配置经 `Cypress.expose()` 读取，敏感值仍经 `cy.env()` 读取。
    *
    * LLM 的 baseURL/model 与目标 URL 属于非敏感值；API key 绝不下发浏览器 ——
    * `/llm/chat` 在 Node 侧按环境变量补齐 Authorization。
@@ -758,6 +758,12 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
     }
   }
   config.env = { ...(config.env || {}), ...browserEnv, ...injectedEnv, KEVE_BRIDGE_PORT: port };
+  if (config.expose !== undefined) {
+    config.expose = { ...config.expose, KEVE_BRIDGE_PORT: port };
+    for (const name of ['KEVE_TARGET_URL', 'BASE_URL', 'KEVE_LLM_BASE_URL', 'LLM_BASE_URL', 'KEVE_LLM_MODEL_NAME', 'KEVE_LLM_MODEL', 'LLM_MODEL_NAME']) {
+      if (config.env[name] !== undefined) config.expose[name] = config.env[name];
+    }
+  }
   console.log(`[keve-bridge] listening on 127.0.0.1:${port} → ${state.resultDir}`);
 
   /**

@@ -55,7 +55,7 @@ function cyChain(): any {
 export function resolveBaseUrl(): string {
   const fromConfig = String(cy().config?.('baseUrl') || '');
   if (/^https?:\/\//.test(fromConfig)) return fromConfig;
-  const fromEnv = String(cy().env?.('KEVE_TARGET_URL') || '');
+  const fromEnv = readBrowserEnv('KEVE_TARGET_URL');
   if (/^https?:\/\//.test(fromEnv)) return fromEnv;
   throw new Error(
     '[cypress-engine] 缺少 baseUrl：请在 cypress.config 设置 baseUrl，或注入 KEVE_TARGET_URL 环境变量',
@@ -63,8 +63,7 @@ export function resolveBaseUrl(): string {
 }
 
 /** 服务端解析好的 SSO cookie（经 config.env 下发，浏览器侧可读） */
-function readInjectedCookies(): any[] {
-  const raw = cy().env?.('KEVE_SSO_COOKIES');
+function readInjectedCookies(raw: unknown): any[] {
   if (!raw) {
     throw new Error('未收到 KEVE_SSO_COOKIES，用例要求必须携带 SSO 登录态');
   }
@@ -87,9 +86,10 @@ export function createCypressEngine(bridge = createBridge()): CypressEngine {
 
 // ─── Agent Re-Act（P0-3：Cypress 侧与 Playwright 同构） ─────────────────
 
-/** 浏览器侧读环境变量：cy.env 优先，其次非敏感 config.env 兜底。 */
+/** 浏览器侧公开配置：Cypress.expose 优先，旧版 Cypress.env 兜底。 */
 function readBrowserEnv(name: string): string {
-  const raw = cy().env?.(name);
+  const runtime = cy();
+  const raw = typeof runtime.expose === 'function' ? runtime.expose(name) : runtime.env?.(name);
   return raw === undefined || raw === null ? '' : String(raw);
 }
 
@@ -382,8 +382,8 @@ export function installCypressHost(): KeveHost {
          * 该步骤跑在 Cypress 的 test body 内 —— Cypress 已在用例开始前清过 cookie，
          * 此处写入的 cookie 不会被再次清掉。
          */
-        const injectCookiesBeforeVisit = async () => {
-          const cookies = readInjectedCookies();
+        const injectCookiesBeforeVisit = async (raw: unknown) => {
+          const cookies = readInjectedCookies(raw);
           try {
             const engine = createCypressEngine(createBridge());
             await engine.injectCookies(cookies);
@@ -393,8 +393,11 @@ export function installCypressHost(): KeveHost {
           }
         };
 
-        return cyChain()
-          .then({ timeout: CY_TEST_TIMEOUT_MS }, injectCookiesBeforeVisit)
+        const cookieChain = typeof cyChain().env === 'function'
+          ? cyChain().env(['KEVE_SSO_COOKIES'], { log: false })
+          : cyChain().then(() => ({ KEVE_SSO_COOKIES: cy().env?.('KEVE_SSO_COOKIES') }));
+        return cookieChain
+          .then({ timeout: CY_TEST_TIMEOUT_MS }, (values: Record<string, unknown>) => injectCookiesBeforeVisit(values.KEVE_SSO_COOKIES))
           /**
            * 唯一的 cy 命令：把 AUT iframe 建起来（CDP 通道依赖它）。
            *
