@@ -1,0 +1,10 @@
+{
+  "completed": "2026-11-01 12:14:03",
+  "windowTokens": 32768,
+  "gpuPairs": [
+    "0,1",
+    "2,3",
+    "4,5"
+  ],
+  "configSha256": "05f22d7d3d5fe08f67795e0af68020c90f40b13bb6df848d69a789b0135ab21a"
+}

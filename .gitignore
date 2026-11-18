@@ -19,6 +19,11 @@ pnpm-lock.yaml
 .tmp-frameprobe/
 .tmp-navprobe/
 
+# suite 一次性页面探针（本地调研用，不入库）
+packages/suite/.tmp-probe*.mjs
+packages/suite/probe*-after.png
+packages/suite/probe*-full.png
+
 # suite 测试执行临时目录与报告产物
 **/.tmp-cyneg/
 **/.tmp-cyverify/

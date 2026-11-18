@@ -1,0 +1,102 @@
+{
+  "seconds": 37.8,
+  "results": [
+    {
+      "aliasPort": 9884,
+      "exitCode": 0,
+      "result": {
+        "label": "image-canonical-24000",
+        "base": "http://127.0.0.1:9884/v1",
+        "started": "2026-11-01 12:14:49",
+        "model": "qwen3-vl-32b-awq",
+        "httpStatus": 200,
+        "usage": {
+          "prompt_tokens": 27806,
+          "total_tokens": 27827,
+          "completion_tokens": 21
+        },
+        "finishReason": "tool_calls",
+        "responseId": "2",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "chatcmpl-urQykChTzZ3SWrmMsPXgsB",
+            "type": "function",
+            "function": {
+              "name": "ObserveDatasetPanel",
+              "arguments": "{\"scope\": \"我创建\", \"empty\": true}"
+            }
+          }
+        ],
+        "observationCorrect": true,
+        "accepted": true,
+        "seconds": 32.54
+      }
+    },
+    {
+      "aliasPort": 9886,
+      "exitCode": 0,
+      "result": {
+        "label": "image-canonical-24000",
+        "base": "http://127.0.0.1:9886/v1",
+        "started": "2026-11-01 12:14:49",
+        "model": "qwen3-vl-32b-awq",
+        "httpStatus": 200,
+        "usage": {
+          "prompt_tokens": 27806,
+          "total_tokens": 27827,
+          "completion_tokens": 21
+        },
+        "finishReason": "tool_calls",
+        "responseId": "2",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "chatcmpl-ugJd7buJgjhSixgNNjL6W3",
+            "type": "function",
+            "function": {
+              "name": "ObserveDatasetPanel",
+              "arguments": "{\"scope\": \"我创建\", \"empty\": true}"
+            }
+          }
+        ],
+        "observationCorrect": true,
+        "accepted": true,
+        "seconds": 32.33
+      }
+    },
+    {
+      "aliasPort": 9888,
+      "exitCode": 0,
+      "result": {
+        "label": "image-canonical-24000",
+        "base": "http://127.0.0.1:9888/v1",
+        "started": "2026-11-01 12:14:49",
+        "model": "qwen3-vl-32b-awq",
+        "httpStatus": 200,
+        "usage": {
+          "prompt_tokens": 27806,
+          "total_tokens": 27827,
+          "completion_tokens": 21
+        },
+        "finishReason": "tool_calls",
+        "responseId": "2",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "chatcmpl-HsLRrSatg9EcJcK29eTyHc",
+            "type": "function",
+            "function": {
+              "name": "ObserveDatasetPanel",
+              "arguments": "{\"scope\": \"我创建\", \"empty\": true}"
+            }
+          }
+        ],
+        "observationCorrect": true,
+        "accepted": true,
+        "seconds": 31.0
+      }
+    }
+  ],
+  "allCorrect": true
+}
