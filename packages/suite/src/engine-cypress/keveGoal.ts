@@ -33,6 +33,8 @@ export interface KeveGoalCallOptions {
    * 步数上限，把一步已成功的动作判成失败。
    */
   deterministic?: boolean;
+  /** 编译器记录的点击目标文案，供 Agent 校验「没有点错替代元素」 */
+  clickTarget?: string;
 }
 
 /** agent Re-Act 的结果（P0-3 接入；未接入时由 fn 结果直接判定） */
@@ -387,9 +389,32 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
 
     // 失败归因必须自带上下文：只报「哪一步 / 为什么」其中的一半，都要回查报告
     // 才能定位。这里把第几步、步骤文案、fn 真实异常、Agent 判定理由一并带上。
-    const agentText = (reactResult.actions || [])
+    const doneAction = (reactResult.actions || [])
       .filter((a: any) => a.action?.tool === 'done')
-      .pop()?.action?.text;
+      .pop();
+    const agentText = doneAction?.action?.text;
+    const doneVerdict = doneAction?.action?.verdict;
+    const lastAction = (reactResult.actions || []).slice(-1)[0];
+    const blockedReason = (() => {
+      if (fnBlocked) return String(fnError);
+      if (agentText) {
+        // Agent 自述成功但终局被判 blocked：必须把矛盾点写出来，否则报告只剩一段成功文案。
+        return doneVerdict && doneVerdict !== 'blocked'
+          ? `${agentText}（done verdict=${doneVerdict}，终局判定为 blocked）`
+          : agentText;
+      }
+      // 没有 done 结论时也给出可排查线索：最后动作是什么、用了几次模型调用。
+      const lastTool = lastAction?.action?.tool;
+      const lastOutput = String(lastAction?.toolOutput || '').replace(/\s+/g, ' ').slice(0, 80);
+      const llmCalls = ((reactResult.diagnostics as any)?.ai?.llmCalls);
+      const hints = [
+        '无 done 结论',
+        lastTool ? `最后动作=${lastTool}` : '无动作记录',
+        lastOutput ? `输出=${lastOutput}` : '',
+        Number.isFinite(llmCalls) ? `LLM 调用=${llmCalls}` : '',
+      ].filter(Boolean);
+      return `Agent blocked（${hints.join('；')}）`;
+    })();
     const failure = describeGoalFailure({
       fnError,
       fnBlocked,
@@ -403,7 +428,7 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     const errorMessage = success
       ? undefined
       : conclusion === 'blocked'
-        ? `Blocked: [步骤${order + 1} ${options.step}] ${fnBlocked ? fnError : agentText || 'Agent blocked'}`
+        ? `Blocked: [步骤${order + 1} ${options.step}] ${blockedReason}`
         : fnErrorRaw?.name === 'ScreenshotDiffError'
           ? `[步骤${order + 1} ${options.step}] ${fnError}`
           : fnError && isAssertionFailure(fnError)

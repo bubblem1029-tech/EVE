@@ -110,6 +110,8 @@ export interface AgentOptions {
     specFilePath?: string;
     fnSource?: string;
     fnResult?: { error?: string; success?: boolean };
+    /** 编译器记录的目标文案；优先于从 fnSource 反推，保证两端提取口径一致 */
+    clickTarget?: string;
     hooks?: AgentHooks;
     /** External abort signal (e.g. per-goal timeout). When aborted, internal abortController is also triggered. */
     signal?: AbortSignal;
@@ -650,13 +652,14 @@ export class KevePageAgent {
                     // next step (e.g. confirming a dataset switch) ahead of schedule.
                     if (actionName === 'click' && !execResult.error && options?.fnResult?.error &&
                         canHandOffRecordedClick(expected, options.fnSource || '', snapshot,
-                            typeof macroInput.ref === 'string' ? macroInput.ref : undefined)) {
+                            typeof macroInput.ref === 'string' ? macroInput.ref : undefined,
+                            options?.clickTarget)) {
                         const after = await this.page.ariaSnapshot({ mode: 'ai' });
                         try {
                             const shot = await this.page.screenshot({ type: 'png', timeout: 15000 });
                             stepEvent.screenshotPath = await this.saveScreenshotBuffer(shot.base64, stepCount, 'recorded-click-handoff');
                         } catch { /* screenshot evidence is best-effort, as for done */ }
-                        taskResult = this.buildResult(true, `Recorded target clicked successfully: ${recordedClickTarget(options.fnSource || '')}`, stepCount + 1, after);
+                        taskResult = this.buildResult(true, `Recorded target clicked successfully: ${options?.clickTarget || recordedClickTarget(options.fnSource || '')}`, stepCount + 1, after);
                         (taskResult as any).conclusion = 'pass';
                         console.log('[AgentHandoff] Exact recorded click completed; returning to deterministic next step');
                         break;
@@ -692,12 +695,14 @@ export class KevePageAgent {
                         }
                         let data = String(actionInput?.text || { pass: 'Goal achieved', fail: 'Expected not achieved', blocked: 'Blocked' }[conclusion]);
                         const target = /点击|click/i.test(step) && options?.fnResult?.error
-                            ? recordedClickTarget(options.fnSource || '') : undefined;
+                            ? (options?.clickTarget || recordedClickTarget(options.fnSource || '')) : undefined;
                         if (conclusion === 'pass' && target && !this.events.some(event =>
                             event.type === 'step' && event.toolName === 'click' && !event.toolError &&
                             typeof event.toolInput?.ref === 'string' && clickMatchesTarget(event.snapshot, event.toolInput.ref, target, options.fnSource || ''))) {
                             conclusion = 'blocked';
                             data = `Recorded click target "${target}" has no verified click evidence; refusing a substituted-target pass`;
+                            this.events.push({ type: 'error', message: data });
+                            this.pushObservation(`[EvidenceGuard] ${data}`);
                         }
                         const success = conclusion === 'pass';
                         console.log(`\x1b[32m\x1b[1mTask completed\x1b[0m ${conclusion} ${data}`);
@@ -908,7 +913,9 @@ export class KevePageAgent {
         prompt += '<user_request>\n';
         prompt += `Step: ${step}\n`;
         prompt += `Expected: ${expected}\n`;
-        const recordedTarget = this.options?.fnResult?.error ? recordedClickTarget(this.options?.fnSource || '') : undefined;
+        const recordedTarget = this.options?.fnResult?.error
+            ? (this.options?.clickTarget || recordedClickTarget(this.options?.fnSource || ''))
+            : undefined;
         if (recordedTarget && /点击|click/i.test(step)) {
             prompt += `Recorded click target (exact): ${JSON.stringify(recordedTarget)}. Do not substitute another item. Use its current ref and report blocked if unavailable.\n`;
         }
@@ -1216,6 +1223,7 @@ export async function reactLoop(
         specFilePath?: string;
         fnSource?: string;
         fnResult?: { error?: string; success?: boolean };
+        clickTarget?: string;
         signal?: AbortSignal;
         goalScreenshotBefore?: string;
         fnAfterScreenshot?: string;
@@ -1291,6 +1299,7 @@ export async function reactLoop(
             specFilePath: options.specFilePath,
             fnSource: options.fnSource,
             fnResult: options.fnResult,
+            clickTarget: options.clickTarget,
             signal: options.signal,
             goalScreenshotBefore: options.goalScreenshotBefore,
             fnAfterScreenshot: options.fnAfterScreenshot,

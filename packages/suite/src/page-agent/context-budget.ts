@@ -12,13 +12,36 @@ done requires verdict pass/fail/blocked and text with observed evidence. Never c
 The tree may be partial. Absence from a partial tree does NOT establish absence from the page. Use execute_javascript to inspect missing content, or scroll/reobserve. Do not change application data beyond the requested test.
 Keep evaluation, memory and next_goal concise; do not restate the full history. Tool parameters are declared in AgentOutput.`;
 
-/** A narrow, deterministic cue from recorded locator code, never an inferred label. */
+/**
+ * A narrow, deterministic cue from recorded locator code, never an inferred label.
+ *
+ * 两种引擎生成的定位源码形态不同，这里统一解析：
+ *   - Playwright 投影：`engine.click(C({ type: "includes", value: "…" }))`
+ *   - Cypress 投影：`engine.click({ chain: [{ "type": "includes", "value": "…" }] })`
+ * 后者是 JSON 形态，键名带引号且 `value` 同样带引号。两条路径都在这里收敛，
+ * 避免各引擎各自实现一套提取规则导致判定不一致。
+ */
 export function recordedClickTarget(source: string): string | undefined {
-  if (!/\.click\s*\(/.test(source)) return undefined;
-  const match = source.match(/\.locator\(\s*(['"])text=([^'"\n]+)\1\s*\)/)
-    || source.match(/\.getByText\(\s*(['"])([^'"\n]+)\1/)
-    || source.match(/\btype:\s*['"](?:includes|text)['"]\s*,\s*value:\s*(['"])([^'"\n]+)\1/);
-  return match?.[2];
+  if (!source) return undefined;
+  const isClickSource = /\.(?:click|forceClick|dblClick)\s*\(/.test(source)
+    || /['"]?chain['"]?\s*:/.test(source);
+  if (!isClickSource) return undefined;
+  const patterns = [
+    // Playwright: locator('text=…') / getByText('…')
+    /\.locator\(\s*(['"])text=([^'"\n]+)\1\s*\)/,
+    /\.getByText\(\s*(['"])([^'"\n]+)\1/,
+    // 内联对象：{ type: "includes", value: "…" }
+    /\btype\s*:\s*['"](?:includes|text)['"]\s*,\s*value\s*:\s*(['"])([^'"\n]+)\1/,
+    // JSON 链：{"type":"includes","value":"…"}
+    /["']type["']\s*:\s*["'](?:includes|text)["']\s*,\s*["']value["']\s*:\s*["']([^"'\n]+)["']/,
+    // JSON 链反序：{"value":"…","type":"includes"}
+    /["']value["']\s*:\s*["']([^"'\n]+)["']\s*,\s*["']type["']\s*:\s*["'](?:includes|text)["']/,
+  ];
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (match) return match[2] ?? match[1];
+  }
+  return undefined;
 }
 
 export function clickMatchesTarget(snapshot: string, ref: string, target: string, source = ''): boolean {
@@ -34,8 +57,14 @@ export function clickMatchesTarget(snapshot: string, ref: string, target: string
   return context.includes(target);
 }
 
-export function canHandOffRecordedClick(expected: string, source: string, snapshot: string, ref?: string): boolean {
-  const target = recordedClickTarget(source);
+export function canHandOffRecordedClick(
+  expected: string,
+  source: string,
+  snapshot: string,
+  ref?: string,
+  targetOverride?: string,
+): boolean {
+  const target = targetOverride || recordedClickTarget(source);
   return expected.trim() === '操作完成，页面正常响应' && !!target && !!ref && clickMatchesTarget(snapshot, ref, target, source);
 }
 

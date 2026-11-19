@@ -216,6 +216,7 @@ function installGoalExplorer(engine: CypressEngine, bridge: ReturnType<typeof cr
         // fn 只是前置确定性校验：成功时也要让 Agent 重新走一遍 Re-Act 给出
         // 最终结论，否则报告里不会产生 AI 推理轨迹。
         fnResult: ctx.fnError ? { error: ctx.fnError } : { success: true },
+        clickTarget: options.clickTarget,
         signal: controller.signal,
         goalScreenshotBefore: ctx.goalScreenshotBefore,
         fnAfterScreenshot: ctx.fnAfterScreenshot,

@@ -63,6 +63,8 @@ export interface KeveGoalCallOptions {
    * 避免 Agent 按字面把「输入」扩大成「把表单填完」而越界操作。
    */
   deterministic?: boolean;
+  /** 编译器记录的点击目标文案，供 Agent 校验「没有点错替代元素」 */
+  clickTarget?: string;
 }
 
 type KeveFixture = {
@@ -350,6 +352,7 @@ export const test = base.extend<KeveFixture>({
               specFilePath: ctx.specFilePath,
               fnSource,
               fnResult: fnError ? { error: fnError } : { success: true },
+              clickTarget: options.clickTarget,
               goalScreenshotBefore: goalScreenshotBefore || undefined,
               fnAfterScreenshot: fnAfterScreenshot || undefined,
               targetUrl: process.env.KEVE_TARGET_URL || '',

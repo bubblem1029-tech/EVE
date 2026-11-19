@@ -269,6 +269,12 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
     ? `元素${describeChain(d.context)}的输入值等于「${describeValue(d.value, ctx)}」`
     : expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
 
+  // 点击类步骤把「记录目标」作为结构化元数据下发给引擎，避免运行时再按源码形态反推：
+  // Playwright 与 Cypress 生成的定位源码格式不同，统一由编译器产出同一份 target。
+  const clickTarget = op === 'CLICK_ELEMENT' || op === 'FORCE_CLICK_ELEMENT' || op === 'DB_CLICK_ELEMENT'
+    ? clickTargetOf(d.context)
+    : '';
+
   const emit = (body: string[]) => {
     // 页面级步骤例外只在没有任何可执行断言时生效；有断言时允许短路。
     const executableLineCount = body.length + expLines.length;
@@ -289,7 +295,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
     });
     const deterministic =
       expectedFullyCovered && !pageLevelOp && executableLineCount > 0 && !hasUnresolved;
-    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${deterministic ? ', deterministic: true' : ''} }, async () => {`);
+    out.push(`await keveGoal({ step: ${q(stepText)}, expected: ${q(expected)}${deterministic ? ', deterministic: true' : ''}${clickTarget ? `, clickTarget: ${q(clickTarget)}` : ''} }, async () => {`);
     for (const b of [...body, ...expLines]) out.push(`  ${b}`);
     out.push(`});`);
   };
@@ -674,6 +680,27 @@ function describeChain(context: DslHop[] | undefined): string {
     return `${h.type}=「${text}」`;
   });
   return `（${parts.join(' → ')}）`;
+}
+
+/**
+ * 从记录下来的定位链里取「点击目标」文案。
+ *
+ * 只认 `includes` / `text` 这类文本命中跳；selector / class 之类没有人类可读
+ * 目标，返回空串（此时引擎侧不会做替代目标校验，行为与改动前一致）。
+ */
+function clickTargetOf(context: DslHop[] | undefined): string {
+  try {
+    const hops = collectHops(context);
+    for (let i = hops.length - 1; i >= 0; i -= 1) {
+      const hop = hops[i];
+      if ((hop.type === 'includes' || hop.type === 'text') && hop.value.trim()) {
+        return hop.value.trim();
+      }
+    }
+  } catch {
+    // 定位链无法解析时不下发目标，交由运行时兜底
+  }
+  return '';
 }
 
 /**

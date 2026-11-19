@@ -9,6 +9,11 @@ describe('context budget', () => {
   it('retains the recorded specific target and rejects substituted click evidence', () => {
     expect(recordedClickTarget("await page.locator('text=订单示例数据集demo').click()" )).toBe('订单示例数据集demo');
     expect(recordedClickTarget('await engine.click(C({ type: "includes", value: "订单示例数据集demo" }))')).toBe('订单示例数据集demo');
+    // Cypress 投影是 JSON 链，键名/值都带引号 —— 与 Playwright 内联对象同一口径解析
+    expect(recordedClickTarget('await engine.click({ chain: [{ "type": "selector", "value": "#app" }, { "type": "includes", "value": "分析QA专属" }] })'))
+      .toBe('分析QA专属');
+    expect(recordedClickTarget('await engine.click({ chain: [{ "value": "分析QA专属", "type": "includes" }] })'))
+      .toBe('分析QA专属');
     expect(recordedClickTarget("await page.getByText('订单示例数据集demo').count()" )).toBeUndefined();
     expect(clickMatchesTarget('- main:\n  - button "盖亚数据集" [ref=e1]', 'e1', '订单示例数据集demo')).toBe(false);
     expect(clickMatchesTarget('- main:\n  - row "订单示例数据集demo":\n    - button "选择" [ref=e2]', 'e2', '订单示例数据集demo')).toBe(true);
@@ -22,6 +27,10 @@ describe('context budget', () => {
     expect(canHandOffRecordedClick('操作完成，页面正常响应', source, tree, 'e1')).toBe(true);
     expect(canHandOffRecordedClick('操作完成，页面正常响应', source, tree, 'e2')).toBe(false);
     expect(canHandOffRecordedClick('数据集切换成功', source, tree, 'e1')).toBe(false);
+    // 编译器下发的 clickTarget 优先于源码反推：Cypress JSON 链也能走同一套交接语义
+    const cypressSource = 'await engine.click({ chain: [{ "type": "includes", "value": "订单示例数据集demo" }] })';
+    expect(canHandOffRecordedClick('操作完成，页面正常响应', cypressSource, tree, 'e1')).toBe(true);
+    expect(canHandOffRecordedClick('操作完成，页面正常响应', cypressSource, tree, 'e2', '订单示例数据集demo')).toBe(false);
   });
   it('counts schemas and images without counting base64 as text', () => {
     const a = estimateRequestTokens({ messages: [{ content: [{ image_url: { url: 'data:' + 'a'.repeat(100) } }] }] });
