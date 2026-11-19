@@ -11,6 +11,7 @@
  */
 
 import { mergeRuntimeDiagnostics, type RuntimeDiagnostics } from '../../page-agent/diagnostics.js';
+import { normalizeVerdict, type ReasonCode, type Verdict } from '../verdict.js';
 
 // ─── 附件契约 ────────────────────────────────────────────────────────
 
@@ -85,6 +86,12 @@ export interface ConfidenceRecord {
   confidence: number;
   thought: string;
   errorCategory: ErrorCategory;
+  /** 双引擎统一结论；报告与跨引擎 diff 以此为准 */
+  verdict: Verdict;
+  /** blocked/fail 的可行动原因；pass/skipped 为空 */
+  reasonCode?: ReasonCode;
+  /** 引擎原始状态，保留用于排查 */
+  rawStatus?: string;
   keveScreenshots?: string[];
   steps: StepResultAttachment[];
   diagnosticHint?: string;
@@ -95,6 +102,8 @@ export interface ConfidenceRecord {
 export type ErrorCategory =
   | 'script' | 'env' | 'assert' | 'visual' | 'text-mismatch'
   | 'incomplete' | 'pass' | 'unknown';
+
+type ConfidenceRecordBody = Omit<ConfidenceRecord, 'verdict' | 'reasonCode' | 'rawStatus'>;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
@@ -224,8 +233,25 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
   let skipAI = false;
   let classifiedMessage = '';
 
+  const withVerdict = (record: ConfidenceRecordBody, agentResult?: 'pass' | 'fail' | 'blocked' | 'incomplete'): ConfidenceRecord => {
+    const normalized = normalizeVerdict({
+      status: input.status,
+      errorCategory: record.errorCategory,
+      error: input.error,
+      agentConclusion: agentResult,
+      diagnosticHint: record.diagnosticHint,
+      data: record.data,
+    });
+    return {
+      ...record,
+      verdict: normalized.verdict,
+      ...(normalized.reasonCode ? { reasonCode: normalized.reasonCode } : {}),
+      rawStatus: normalized.rawStatus,
+    };
+  };
+
   if (input.status === 'skipped') {
-    const record: ConfidenceRecord = {
+    const record: ConfidenceRecordBody = {
       title: input.title,
       data: '跳过',
       confidence: 0,
@@ -235,7 +261,7 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
       diagnosticHint: undefined,
       diagnostics,
     };
-    return { record, skipAI: true, log: 'SKIPPED' };
+    return { record: withVerdict(record), skipAI: true, log: 'SKIPPED' };
   }
 
   if (input.status === 'passed') {
@@ -293,7 +319,7 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
     // 格式差异误杀语义正确的执行；断言文本差异由期望回填机制修正。
     // 无截图证据的 Agent pass 不享受此待遇，维持阻塞判定（防幻觉假绿）。
     if (effectiveCategory === 'pass' && steps.some((s: any) => s?.screenshotPath)) {
-      const record: ConfidenceRecord = {
+      const record: ConfidenceRecordBody = {
         title: input.title,
         data: '通过（AI复核）',
         confidence: 0.75,
@@ -304,7 +330,7 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
         diagnosticHint,
         diagnostics,
       };
-      return { record, skipAI: true, log: 'SHORT-CIRCUIT skipAI (category=pass, ai-review-pass)' };
+      return { record: withVerdict(record, agentConclusion?.result), skipAI: true, log: 'SHORT-CIRCUIT skipAI (category=pass, ai-review-pass)' };
     }
     const thought = effectiveCategory === 'script'
       ? `脚本本身存在代码错误(${classifiedMessage})，测试结果无效`
@@ -322,7 +348,7 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
     // AI 评估列：assert/text-mismatch → 不通过；其余无法得出结论 → 阻塞
     const aiData = (effectiveCategory === 'assert' || effectiveCategory === 'text-mismatch') ? '不通过' : '阻塞';
     return {
-      record: {
+      record: withVerdict({
         title: input.title,
         data: aiData,
         confidence: CONFIDENCE_MAP[effectiveCategory] ?? 0,
@@ -332,14 +358,14 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
         steps,
         diagnosticHint,
         diagnostics,
-      },
+      }, agentConclusion?.result),
       skipAI: true,
       log: `SHORT-CIRCUIT skipAI (category=${effectiveCategory})`,
     };
   }
 
   return {
-    record: {
+    record: withVerdict({
       title: input.title,
       data: input.status === 'passed' ? '通过' : '不通过',
       confidence: CONFIDENCE_MAP[effectiveCategory] ?? 0,
@@ -349,7 +375,7 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
       steps,
       diagnosticHint,
       diagnostics,
-    },
+    }, agentConclusion?.result),
     skipAI: false,
     log: `${input.status} (category=${effectiveCategory})`,
   };

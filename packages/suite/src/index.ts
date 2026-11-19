@@ -1,4 +1,33 @@
 export { generateReportData, type ReportDataOptions, parseCaseIdFromTitle, extractAllSpecs, buildCaseResultMap, parseYamlSimple } from './core/generateReport/reportData.js';
+export {
+  buildCaseIdentity,
+  normalizeGroupName,
+  splitGroupName,
+  formatCaseDisplayName,
+  type CaseGroupInfo,
+  type CaseGroupNode,
+  type CaseGroupStats,
+  type CaseIdentity,
+  type CaseIdentityInput,
+} from './core/case-identity.js';
+export {
+  normalizeVerdict,
+  isInfraReason,
+  type NormalizedVerdict,
+  type NormalizeVerdictInput,
+  type ReasonCode,
+  type Verdict,
+} from './core/verdict.js';
+export { resolveLlmContextEnv, withLlmContextHeaders, type LlmContextEnv } from './core/llm-context.js';
+export {
+  buildCrossEngineDiffReport,
+  type CrossEngineDiffEntry,
+  type CrossEngineDiffReport,
+  type DiffCaseResult,
+  type DiffStep,
+  type DiffType,
+  type StepDiff,
+} from './core/cross-engine-diff.js';
 
 // Re-Act loop (refactored to page-agent)
 export { KevePageAgent, reactLoop, type AgentResult, type AgentStepEvent, type AgentEvent, type AgentOptions, type AgentHooks } from './page-agent/agent.js';

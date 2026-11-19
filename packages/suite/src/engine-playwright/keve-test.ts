@@ -39,6 +39,7 @@ import { activeBrowserCacheDir } from '../core/browserCache.js';
 import { resolveStorageStatePath, writeStorageState, readInjectedCookies } from './global-setup.js';
 import { beginGoalShotDiffCapture, drainGoalShotDiff, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
 import { isAssertionFailure, isEnvironmentBlockedError, inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
+import { withLlmContextHeaders } from '../core/llm-context.js';
 
 export { expect };
 export { keveModel, keveScene, getModelScenes } from '../core/decorator/keve-decorators.js';
@@ -615,6 +616,7 @@ function reactLlmConfig(): {
   baseURL: string;
   model: string;
   apiKey?: string;
+  customFetch?: typeof globalThis.fetch;
 } {
   let cfg = { base_url: '', model: '', api_key: '' } as {
     base_url: string;
@@ -628,5 +630,6 @@ function reactLlmConfig(): {
     baseURL: cfg.base_url || process.env.KEVE_LLM_BASE_URL || '',
     model: cfg.model || process.env.KEVE_LLM_MODEL_NAME || process.env.KEVE_LLM_MODEL || '',
     apiKey: cfg.api_key || process.env.KEVE_LLM_API_KEY || '',
+    customFetch: withLlmContextHeaders(),
   };
 }

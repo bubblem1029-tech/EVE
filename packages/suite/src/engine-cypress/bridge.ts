@@ -559,6 +559,15 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
         try {
           // apiKey 只留在 Node 侧：浏览器侧不带 Authorization，由这里按环境变量补齐。
           const reqHeaders: Record<string, string> = { ...((payload.headers || {}) as Record<string, string>) };
+          const contextHeaders: Record<string, string> = {
+            'x-eve-batch-id': process.env.KEVE_BATCH_ID || '',
+            'x-eve-task-id': process.env.KEVE_TASK_ID || '',
+            'x-eve-caller': process.env.KEVE_LLM_CALLER || 'keve-suite',
+          };
+          for (const [name, value] of Object.entries(contextHeaders)) {
+            const exists = Object.keys(reqHeaders).some((key) => key.toLowerCase() === name);
+            if (!exists && value) reqHeaders[name] = value;
+          }
           const hasAuth = Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'authorization');
           const apiKey = process.env.KEVE_LLM_API_KEY || process.env.LLM_API_KEY || '';
           if (!hasAuth && apiKey) reqHeaders.Authorization = `Bearer ${apiKey}`;

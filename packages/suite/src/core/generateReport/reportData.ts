@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sceneGoalsMap } from '../decorator/keve-registry.js';
 import { mergeRuntimeDiagnostics, type RuntimeDiagnostics } from '../../page-agent/diagnostics.js';
+import { normalizeVerdict, type ReasonCode, type Verdict } from '../verdict.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 export interface ReportDataOptions {
@@ -41,6 +42,12 @@ interface TestCaseStep { step: string; expected: string; }
 interface TestCaseDef {
   id: string; title: string; priority: string; type: string;
   precondition: string[]; steps: TestCaseStep[]; notes: string;
+  caseKey?: string;
+  groupId?: string;
+  groupName?: string;
+  groupPath?: string;
+  groupRawName?: string;
+  groupDepth?: number;
 }
 interface TestModule { name: string; description: string; cases: TestCaseDef[]; }
 interface TestCaseYaml {
@@ -120,6 +127,20 @@ export interface StepReportItem {
 export interface CaseReportItem {
   /** 用例ID，如 "NA-10" */
   caseId: string;
+  /** 机器可读短名；缺省时为空 */
+  caseName: string;
+  /** 报表紧凑展示：分组 · caseId · 标题 */
+  displayName: string;
+  /** 用例库直接父分组（已剥离动态计数） */
+  groupName: string;
+  /** 用例库分组完整路径 */
+  groupPath: string;
+  /** 用例库原始目录名 */
+  groupRawName: string;
+  /** 用例库稳定分组 ID */
+  groupId: string;
+  /** 分组层级 */
+  groupDepth: number;
   /** 模块标识符（YAML module.name 或 Playwright suitePath 提取） */
   module: string;
   /** 模块描述（YAML module.description 或 module.name） */
@@ -138,6 +159,10 @@ export interface CaseReportItem {
   notes: string;
   /** 执行状态: "passed" | "failed" | "skipped" | "missing" */
   status: string;
+  /** 双引擎统一结论 */
+  verdict: Verdict;
+  /** 失败/阻塞原因 */
+  reasonCode?: ReasonCode;
   /** 执行耗时(ms) */
   duration: number;
   /** 执行开始时间 */
@@ -291,7 +316,8 @@ function parseYamlSimple(yamlText: string): TestCaseYaml {
     if (caseMatch) {
       currentCase = {
         id: stripYamlQuotes(caseMatch[2].trim()), title: '', priority: '', type: '',
-        precondition: [], steps: [], notes: ''
+        precondition: [], steps: [], notes: '',
+        caseKey: '', groupId: '', groupName: '', groupPath: '', groupRawName: '', groupDepth: 0,
       };
       if (currentModule) currentModule.cases.push(currentCase);
       inSteps = false;
@@ -302,6 +328,18 @@ function parseYamlSimple(yamlText: string): TestCaseYaml {
     if (currentCase && !inSteps && !inPrecondition) {
       if (trimmed.startsWith('        title:')) {
         currentCase.title = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        caseKey:')) {
+        currentCase.caseKey = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        groupId:')) {
+        currentCase.groupId = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        groupName:')) {
+        currentCase.groupName = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        groupPath:')) {
+        currentCase.groupPath = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        groupRawName:')) {
+        currentCase.groupRawName = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
+      } else if (trimmed.startsWith('        groupDepth:')) {
+        currentCase.groupDepth = Number(stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim())) || 0;
       } else if (trimmed.startsWith('        priority:')) {
         currentCase.priority = stripYamlQuotes(trimmed.substring(trimmed.indexOf(':') + 1).trim());
       } else if (trimmed.startsWith('        type:')) {
@@ -567,7 +605,7 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
   const confidenceDist = { '95-100': 0, '61-90': 0, '41-60': 0, '0-40': 0 };
 
   // Read confidence-data.jsonl (AI evaluation results from KeveReporter)
-  let aiConfidenceMap: Record<string, { data: string; confidence: number; thought: string; error: string | null; errorCategory?: string; diagnosticHint?: string; steps?: any[]; diagnostics?: RuntimeDiagnostics }> = {};
+  let aiConfidenceMap: Record<string, { data: string; confidence: number; thought: string; error: string | null; errorCategory?: string; diagnosticHint?: string; steps?: any[]; diagnostics?: RuntimeDiagnostics; verdict?: Verdict; reasonCode?: ReasonCode }> = {};
   if (fs.existsSync(CONFIDENCE_DATA_JSONL)) {
     try {
       const lines = fs.readFileSync(CONFIDENCE_DATA_JSONL, 'utf-8').trim().split('\n');
@@ -613,6 +651,8 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
             error: entry.error || null,
             errorCategory: entry.errorCategory || undefined,
             diagnosticHint: entry.diagnosticHint || undefined,
+            verdict: entry.verdict || undefined,
+            reasonCode: entry.reasonCode || undefined,
             steps,
             diagnostics: entry.diagnostics,
           };
@@ -694,6 +734,21 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
     const yamlCase = yamlCaseLookup[caseId];
     // Title: use result.title (Playwright spec.title) but strip ID prefix for display
     const displayTitle = result.title.replace(/^[A-Z]+-\d+:\s*|^[A-Z]+\d+:\s*/, '').replace(/^\[[A-Z]+-\d+\]\s*|^\[[A-Z]+\d+\]\s*/, '');
+    const caseName = yamlCase?.caseKey || '';
+    const groupName = yamlCase?.groupName || '';
+    const groupPath = yamlCase?.groupPath || '';
+    const groupRawName = yamlCase?.groupRawName || '';
+    const groupId = yamlCase?.groupId || '';
+    const groupDepth = Number(yamlCase?.groupDepth || 0);
+    const normalized = aiEntry?.verdict
+      ? { verdict: aiEntry.verdict as Verdict, reasonCode: aiEntry.reasonCode as ReasonCode | undefined }
+      : normalizeVerdict({
+        status: effectiveStatus,
+        data,
+        errorCategory: aiEntry?.errorCategory,
+        error: result.error,
+      });
+    const displayName = [groupName, caseId, displayTitle].filter(Boolean).join(' · ');
 
     const steps: StepReportItem[] = aiEntry?.steps
       ? aiEntry.steps.map((s: any) => {
@@ -780,6 +835,13 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
 
     caseResults.push({
       caseId,
+      caseName,
+      displayName,
+      groupName,
+      groupPath,
+      groupRawName,
+      groupId,
+      groupDepth,
       module: moduleName,
       moduleDescription: moduleDesc,
       title: displayTitle,
@@ -789,6 +851,8 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
       steps,
       notes: yamlCase?.notes || '',
       status: effectiveStatus,
+      verdict: normalized.verdict,
+      ...(normalized.reasonCode ? { reasonCode: normalized.reasonCode } : {}),
       duration: result.duration,
       startTime: result.startTime,
       pwSteps: result.pwSteps,
@@ -819,8 +883,17 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
       const data = '跳过';
       const confidence = 0;
       confidenceDist['0-40']++;
+      const groupName = caseDef.groupName || '';
+      const displayName = [groupName, caseDef.id, caseDef.title].filter(Boolean).join(' · ');
       caseResults.push({
         caseId: caseDef.id,
+        caseName: caseDef.caseKey || '',
+        displayName,
+        groupName,
+        groupPath: caseDef.groupPath || '',
+        groupRawName: caseDef.groupRawName || '',
+        groupId: caseDef.groupId || '',
+        groupDepth: Number(caseDef.groupDepth || 0),
         module: mod.name,
         moduleDescription: mod.description || mod.name,
         title: caseDef.title,
@@ -830,6 +903,8 @@ export async function generateReportData(opts: ReportDataOptions): Promise<any> 
         steps: caseDef.steps,
         notes: caseDef.notes,
         status: 'missing',
+        verdict: 'blocked',
+        reasonCode: 'script_evidence_missing',
         duration: 0,
         startTime: '',
         pwSteps: [],

@@ -46,6 +46,7 @@ import {
   buildExecEnv as buildExecEnvFromSuite,
   projectCasesToSpecs,
   buildCasesYaml,
+  runEnginePreflight,
 } from '../dist/runner/index.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -528,10 +529,22 @@ function runPlaywright({ input, taskDir, specDir, resultDir, round }) {
   const backendRoot = input.backendRoot || defaultBackendRoot;
   const cli = resolveEngineBin({ engine: 'playwright', backendRoot, suiteRoot });
   if (!cli || !fs.existsSync(cli)) fail('找不到 Playwright 可执行文件，请设置 KEVE_PLAYWRIGHT_BIN');
+  const env = buildExecEnvFromSuite({ input, taskDir, round, engine: 'playwright', defaultBackendRoot, suiteRoot });
+  const preflight = runEnginePreflight({
+    engine: 'playwright',
+    bin: cli,
+    taskDir,
+    configPath,
+    env,
+  });
+  if (!preflight.ok) {
+    console.error(`[run-dsl-task] Playwright preflight 失败（${preflight.reasonCode}）：${preflight.message || ''}`);
+    return 1;
+  }
   const result = spawnSync(cli, ['test', '--config', configPath], {
     cwd: taskDir,
     stdio: 'inherit',
-    env: buildExecEnvFromSuite({ input, taskDir, round, engine: 'playwright', defaultBackendRoot, suiteRoot }),
+    env,
   });
   if (result.error) fail(`Playwright 启动失败: ${result.error.message}`);
   return result.status ?? 1;
@@ -592,6 +605,22 @@ function runCypress({ input, taskDir, specDir, resultDir, round }) {
   // 默认 chrome（缓存可生效）；显式指定则完全尊重调用方。若环境没有 Chrome，
   // 退回 electron 保证任务能跑，但缓存会失效 —— 因此打出告警。
   const browser = resolveCypressBrowser();
+  const env = {
+    ...buildExecEnvFromSuite({ input, taskDir, round, engine: 'cypress', defaultBackendRoot, suiteRoot }),
+    // Cypress 内部会 fork Electron；清空该变量避免以纯 Node 模式启动
+    ELECTRON_RUN_AS_NODE: '',
+  };
+  const preflight = runEnginePreflight({
+    engine: 'cypress',
+    bin: cypressBin,
+    taskDir,
+    configPath,
+    env,
+  });
+  if (!preflight.ok) {
+    console.error(`[run-dsl-task] Cypress preflight 失败（${preflight.reasonCode}）：${preflight.message || ''}`);
+    return 1;
+  }
   const result = spawnSync(cypressBin, [
     'run',
     '--project', taskDir,
@@ -602,11 +631,7 @@ function runCypress({ input, taskDir, specDir, resultDir, round }) {
   ], {
     cwd: taskDir,
     stdio: 'inherit',
-    env: {
-      ...buildExecEnvFromSuite({ input, taskDir, round, engine: 'cypress', defaultBackendRoot, suiteRoot }),
-      // Cypress 内部会 fork Electron；清空该变量避免以纯 Node 模式启动
-      ELECTRON_RUN_AS_NODE: '',
-    },
+    env,
   });
   if (result.error) fail(`Cypress 启动失败: ${result.error.message}`);
   return result.status ?? 1;

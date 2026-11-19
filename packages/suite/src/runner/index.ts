@@ -17,7 +17,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveBrowserCacheDir } from '../core/browserCache.js';
+import { buildCaseIdentity, type CaseGroupNode } from '../core/case-identity.js';
 import { toDecorator, stepExpectedText, type DslStep, type DslVariableRow } from '../dsl/index.js';
+export { runEnginePreflight, type EnginePreflightOptions, type PreflightCheck, type PreflightResult } from './preflight.js';
 
 export type ExecutionEngine = 'cypress' | 'playwright';
 
@@ -70,6 +72,8 @@ export function resolveEsbuildModule(backendRoot: string, suiteRoot: string): st
 
 export interface BuildExecEnvOptions {
   input: {
+    taskId?: string | number;
+    batchId?: string | number;
     backendRoot?: string;
     env?: string;
     targetUrl?: string;
@@ -107,6 +111,8 @@ export function buildExecEnv({
   return {
     ...process.env,
     KEVE_TASK_DIR: taskDir,
+    KEVE_TASK_ID: String(input.taskId || ''),
+    KEVE_BATCH_ID: String(input.batchId || ''),
     KEVE_RESULT_DIR: path.join(taskDir, 'reports', `round-${round}`),
     KEVE_CASES_DIR: path.join(taskDir, 'cases'),
     KEVE_ARTIFACT_BASE: taskDir,
@@ -131,9 +137,13 @@ export function buildExecEnv({
 export interface CaseInput {
   stepGroupId: number | string;
   caseName?: string;
+  /** 可选的机器可读短名；缺省时由 suite 生成 */
+  caseKey?: string;
   dslList: DslStep[];
   variableList?: DslVariableRow[];
   accountInfo?: { accountInfo?: { name?: string; password?: string }; name?: string; password?: string } | null;
+  /** 用例库目录链：根 → 直接父分组 */
+  groupChain?: CaseGroupNode[];
 }
 
 export interface ProjectCasesOptions {
@@ -148,8 +158,17 @@ export interface ProjectCasesOptions {
 
 export interface CaseEntry {
   caseId: string;
+  caseKey: string;
   stepGroupId: number;
   caseName: string;
+  title: string;
+  displayName: string;
+  detailLabel: string;
+  groupId: string;
+  groupName: string;
+  groupPath: string;
+  groupRawName: string;
+  groupDepth: number;
   specFile: string;
   stepCount: number;
   steps: { step: string; expected: string }[];
@@ -233,6 +252,13 @@ export function projectCasesToSpecs({
     const variableList = Array.isArray(item.variableList) ? item.variableList : [];
     const renderCtx = { env, variableList, account };
     const caseName = item.caseName || `用例 ${stepGroupId}`;
+    const caseId = `S${stepGroupId}`;
+    const identity = buildCaseIdentity({
+      caseId,
+      title: caseName,
+      caseKey: item.caseKey,
+      groupChain: item.groupChain,
+    });
     const code = toDecorator({
       stepGroupId,
       caseName,
@@ -247,9 +273,18 @@ export function projectCasesToSpecs({
     const fileName = `sg${stepGroupId}.spec.ts`;
     fs.writeFileSync(path.join(specDir, fileName), code, 'utf-8');
     caseEntries.push({
-      caseId: `S${stepGroupId}`,
+      caseId,
+      caseKey: identity.caseName,
       stepGroupId,
       caseName,
+      title: identity.title,
+      displayName: identity.displayName,
+      detailLabel: identity.detailLabel,
+      groupId: identity.groupId,
+      groupName: identity.groupName,
+      groupPath: identity.groupPath,
+      groupRawName: identity.groupRawName,
+      groupDepth: identity.groupDepth,
       specFile: fileName,
       stepCount: dslList.length,
       steps: buildCaseSteps(dslList, renderCtx),
@@ -264,6 +299,12 @@ export function buildCasesYaml(caseEntries: CaseEntry[]): string {
   for (const entry of caseEntries) {
     lines.push(`      - id: ${entry.caseId}`);
     lines.push(`        title: ${JSON.stringify(entry.caseName)}`);
+    lines.push(`        caseKey: ${JSON.stringify(entry.caseKey)}`);
+    if (entry.groupId) lines.push(`        groupId: ${JSON.stringify(entry.groupId)}`);
+    if (entry.groupName) lines.push(`        groupName: ${JSON.stringify(entry.groupName)}`);
+    if (entry.groupPath) lines.push(`        groupPath: ${JSON.stringify(entry.groupPath)}`);
+    if (entry.groupRawName) lines.push(`        groupRawName: ${JSON.stringify(entry.groupRawName)}`);
+    if (Number.isFinite(entry.groupDepth)) lines.push(`        groupDepth: ${entry.groupDepth}`);
     if (Array.isArray(entry.steps) && entry.steps.length) {
       lines.push('        steps:');
       for (const step of entry.steps) {
