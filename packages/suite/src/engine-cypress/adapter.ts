@@ -17,6 +17,12 @@ import type { ExpectScreenshotOptions } from '../core/judge/screenshotDiff.js';
 import type { Cdp } from './cdp.js';
 import { pollUntil } from './cdp.js';
 import {
+  pageReadySource,
+  describePageReadyFailure,
+  type PageReadyOptions,
+  type PageReadyResult,
+} from '../dsl/pageReadySource.js';
+import {
   beginGoalShotDiffCapture, drainGoalShotDiff, isGoalShotDiffCaptureActive,
   recordShotDiff, CypressScreenshotDiffError, type CyShotDiffResult,
 } from './shotBuffer.js';
@@ -63,7 +69,7 @@ function escapeRegExp(s: string): string {
 }
 
 export class CypressEngine implements EngineAdapter {
-  constructor(private cdp: Cdp, private bridge: Bridge) {}
+  constructor(private cdp: Cdp, private bridge: Bridge) { }
 
   // ── AUT 上下文准备 ────────────────────────────────────────────────
 
@@ -95,7 +101,7 @@ export class CypressEngine implements EngineAdapter {
   private async withWait<T>(fn: () => Promise<T>, timeout = 10000, interval = 150): Promise<T> {
     const deadline = Date.now() + timeout;
     let lastErr: any;
-    for (;;) {
+    for (; ;) {
       try {
         return await fn();
       } catch (err: any) {
@@ -548,6 +554,12 @@ export class CypressEngine implements EngineAdapter {
       const actual = await this.opsCall<string>('title');
       if (actual !== title) throw new Error(`断言失败：标题应等于 '${title}'，实际为 '${actual}'`);
     });
+  }
+
+  async expectPageReady(options: PageReadyOptions = {}): Promise<PageReadyResult> {
+    const result = await this.cdp.evaluateInAut<PageReadyResult>(pageReadySource(options));
+    if (!result || result.ready !== true) throw new Error(describePageReadyFailure(result));
+    return result;
   }
 
   // ── 探索辅助 ─────────────────────────────────────────────────────

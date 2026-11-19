@@ -11,6 +11,7 @@
 
 import type { ElementRef, ElementEntry, DefinedPage } from './definePage.js';
 import type { ExpectScreenshotOptions, ShotDiffResult } from '../judge/screenshotDiff.js';
+import type { PageReadyOptions, PageReadyResult } from '../../dsl/pageReadySource.js';
 
 /** waitForResponse 选项：就绪门语义（软等待 = 超时不阻塞，与 waitForReady.api 一致） */
 export interface WaitForResponseOptions {
@@ -126,6 +127,8 @@ export interface EngineAdapter {
   expectTitle(part: string): Promise<void>;
   /** 断言：页面标题等于 */
   expectTitleEquals(title: string): Promise<void>;
+  /** 断言：页面渲染未出现白屏（DOM + 稳定窗口；像素由调用方补充） */
+  expectPageReady(options?: PageReadyOptions): Promise<PageReadyResult>;
   /** 获取底层引擎 page（仅探索场景使用；Cypress 下返回 CDP driver，无 Playwright Page） */
   rawPage(): any;
   /** aria snapshot（AI 探索用） */

@@ -63,6 +63,7 @@ export const ASSERT_OPERATIONS = [
   'SCREEN_SHOT_COMPARE',
   'SCREENSHOT_COMPARE',
   'IMAGE_COMPARE',
+  'PAGE_READY',
 ] as const;
 
 /**

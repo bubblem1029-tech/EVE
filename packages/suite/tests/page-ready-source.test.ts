@@ -1,0 +1,80 @@
+import { JSDOM } from 'jsdom';
+import { describe, expect, it } from 'vitest';
+import { pageReadySource, type PageReadyResult } from '../src/dsl/pageReadySource';
+
+function createDom(html: string) {
+  const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, {
+    url: 'https://example.test/dashboard',
+    pretendToBeVisual: true,
+    runScripts: 'outside-only',
+  });
+  const win = dom.window as any;
+  win.getComputedStyle = () => ({ visibility: 'visible', display: 'block', opacity: '1' });
+  win.HTMLElement.prototype.getBoundingClientRect = () => ({
+    width: 100,
+    height: 100,
+    top: 0,
+    left: 0,
+    right: 100,
+    bottom: 100,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+  return dom;
+}
+
+async function run(html: string, options: Record<string, any> = {}): Promise<PageReadyResult> {
+  const dom = createDom(html);
+  const result = await dom.window.eval(
+    pageReadySource({ stableTimes: 1, intervalMs: 10, timeoutMs: 2000, ...options }),
+  );
+  dom.window.close();
+  return result as PageReadyResult;
+}
+
+describe('pageReadySource', () => {
+  it('detects visible content', async () => {
+    const result = await run('<div id="app"><div>数据看板内容</div></div>');
+    expect(result.ready).toBe(true);
+    expect(result.reason).toBe('CONTENT_VISIBLE');
+  });
+
+  it('detects a blank app root', async () => {
+    const result = await run('<div id="app"></div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('BLANK_APP_ROOT');
+  });
+
+  it('detects persistent loading', async () => {
+    const result = await run('<div id="app"><div class="el-loading-mask"></div></div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('PERSISTENT_LOADING');
+  });
+
+  it('detects a login page', async () => {
+    const result = await run('<div id="app"><input type="password" /></div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('LOGIN_REQUIRED');
+  });
+
+  it('detects an error page', async () => {
+    const result = await run('<div id="app">404 页面不存在</div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('ERROR_PAGE');
+  });
+
+  it('treats a canvas-only page as unverified by default', async () => {
+    const result = await run('<div id="app"><canvas></canvas></div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('CANVAS_CONTENT_UNVERIFIED');
+    expect(result.canvasUnverified).toBe(true);
+  });
+
+  it('allows a canvas-only page when explicitly configured', async () => {
+    const result = await run('<div id="app"><canvas></canvas></div>', { allowCanvas: true });
+    expect(result.ready).toBe(true);
+    expect(result.canvasUnverified).toBe(true);
+  });
+});
+

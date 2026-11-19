@@ -17,6 +17,12 @@ import type { ElementRef, ElementEntry, DefinedPage } from '../core/page-object/
 import { isElementFactory } from '../core/page-object/definePage.js';
 import type { EngineAdapter, WaitForResponseOptions, WaitForResponseResult } from '../core/page-object/engine-types.js';
 import { resolvePageUrl } from '../core/page-object/engine-types.js';
+import {
+  pageReadySource,
+  describePageReadyFailure,
+  type PageReadyOptions,
+  type PageReadyResult,
+} from '../dsl/pageReadySource.js';
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -465,6 +471,12 @@ export class PlaywrightEngine implements EngineAdapter {
 
   async expectTitleEquals(title: string): Promise<void> {
     await pwExpect(this.page).toHaveTitle(title);
+  }
+
+  async expectPageReady(options: PageReadyOptions = {}): Promise<PageReadyResult> {
+    const result = await this.page.evaluate(pageReadySource(options)) as PageReadyResult;
+    if (!result || result.ready !== true) throw new Error(describePageReadyFailure(result));
+    return result;
   }
 
   rawPage(): Page {

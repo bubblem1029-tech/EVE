@@ -57,6 +57,8 @@ export interface DslExpectation {
   value?: DslValue;
   context?: DslHop[];
   baseImgUrl?: string;
+  /** PAGE_READY 等断言的结构化参数；JSON 列存储，无需迁移 */
+  options?: Record<string, any>;
 }
 
 /** 一条步骤 */
@@ -655,6 +657,8 @@ function describeExpectation(e: DslExpectation, val: string): string | null {
     case 'SCREENSHOT_COMPARE':
     case 'IMAGE_COMPARE':
       return `页面截图与基线「${value || e.text || ''}」一致`;
+    case 'PAGE_READY':
+      return '页面渲染未出现白屏';
     default:
       return null;
   }
@@ -780,6 +784,10 @@ function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
         ].join(' ');
       }
       return `await engine.screenshot(${shotKeyExpr});${comment}`;
+    }
+    case 'PAGE_READY': {
+      const options = e.options && typeof e.options === 'object' ? e.options : {};
+      return `await engine.expectPageReady(${JSON.stringify(options)});${comment}`;
     }
     default:
       return `throw new Error(${q(

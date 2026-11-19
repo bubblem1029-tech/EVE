@@ -37,3 +37,22 @@ describe('toDecorator clickTarget', () => {
     expect(code).not.toContain('clickTarget:');
   });
 });
+
+describe('toDecorator PAGE_READY', () => {
+  it('renders the shared page-ready assertion with options', () => {
+    const code = render({
+      operation: 'OPEN_PAGE',
+      value: 'https://example.test/dashboard',
+      expectation: [
+        {
+          type: 'PAGE_READY',
+          text: '页面渲染未出现白屏',
+          options: { rootSelector: '#app', allowCanvas: false, stableTimes: 3 },
+        },
+      ],
+    });
+    expect(code).toContain('engine.expectPageReady');
+    expect(code).toContain('"rootSelector":"#app"');
+    expect(code).toContain('"allowCanvas":false');
+  });
+});
