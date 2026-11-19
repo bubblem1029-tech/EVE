@@ -19,6 +19,9 @@
 export function isEnvironmentBlockedError(err: any): boolean {
   const msg = (err?.message || String(err)).toLowerCase();
 
+  // 错误文本里已经带出 SSO/CAS 地址时直接阻断，避免 Agent 继续尝试登录。
+  if (isSsoRedirectUrl(msg)) return true;
+
   // Empty/undefined URL: page.goto('') or page.goto(undefined)
   if (msg.includes('url must not be empty') || msg.includes('url is empty')
     || msg.includes('invalid url') || msg.includes('url is undefined')
@@ -67,6 +70,18 @@ export function isEnvironmentBlockedError(err: any): boolean {
   }
 
   return false;
+}
+
+/**
+ * 当前 URL 是否已经落到 SSO / CAS 登录页。
+ *
+ * 这类页面是认证前置条件失败，Agent 无法通过探索修复；必须在进入 Re-Act 前
+ * 直接 blocked，否则 Agent 会尝试点 0Pass/KIM、消耗模型调用并最终撞 429。
+ */
+export function isSsoRedirectUrl(url?: string | null): boolean {
+  const value = String(url || '').trim();
+  if (!value) return false;
+  return /sso\.corp\.kuaishou\.com\/cas\/login|\/cas\/login|sso[^/]*\/login|login\.corp\.kuaishou\.com/i.test(value);
 }
 
 /**

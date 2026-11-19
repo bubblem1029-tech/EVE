@@ -14,7 +14,7 @@
 
 import { sceneGoalsMap, type KeveGoalMeta } from '../core/decorator/keve-registry.js';
 import { keveAspect } from '../core/decorator/keve-aspect.js';
-import { isAssertionFailure, isEnvironmentBlockedError, deriveActionConclusion } from '../core/judge/goal-heuristics.js';
+import { isAssertionFailure, isEnvironmentBlockedError, isSsoRedirectUrl, deriveActionConclusion } from '../core/judge/goal-heuristics.js';
 import { beginGoalShotDiffCapture, drainGoalShotDiff, isGoalShotDiffCaptureActive } from './shotBuffer.js';
 import { addAttachment, addLog, encodeAttachmentBody, nextGoalOrder, requireTestState } from './state.js';
 import type { CypressEngine } from './adapter.js';
@@ -287,6 +287,16 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
 
     // ── 判定 ──
     let reactResult: CyGoalExploreResult;
+    if (!fnBlocked) {
+      try {
+        const currentUrl = await engine.currentUrl();
+        if (isSsoRedirectUrl(currentUrl)) {
+          fnBlocked = true;
+          fnError = `页面被重定向到SSO统一认证登录页（${currentUrl}），无法访问目标页面`;
+          console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — SSO redirect: ${currentUrl}`);
+        }
+      } catch { /* URL 读不到时保持原判定 */ }
+    }
     if (fnBlocked) {
       reactResult = {
         expectedMet: false,

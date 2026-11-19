@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inferConclusionFromDoneText } from '../src/core/judge/goal-heuristics.js';
+import { inferConclusionFromDoneText, isSsoRedirectUrl } from '../src/core/judge/goal-heuristics.js';
 
 describe('inferConclusionFromDoneText', () => {
   it('treats bare fail keywords as failures', () => {
@@ -23,5 +23,14 @@ describe('inferConclusionFromDoneText', () => {
     expect(inferConclusionFromDoneText(undefined)).toBeUndefined();
     expect(inferConclusionFromDoneText('')).toBeUndefined();
     expect(inferConclusionFromDoneText('   ')).toBeUndefined();
+  });
+});
+
+describe('isSsoRedirectUrl', () => {
+  it('detects CAS login redirects without treating normal product pages as SSO', () => {
+    expect(isSsoRedirectUrl('https://sso.corp.kuaishou.com/cas/login?service=x')).toBe(true);
+    expect(isSsoRedirectUrl('https://login.corp.kuaishou.com/')).toBe(true);
+    expect(isSsoRedirectUrl('https://kwaibi.corp.kuaishou.com/home')).toBe(false);
+    expect(isSsoRedirectUrl('https://kwaibi.corp.kuaishou.com/login-help')).toBe(false);
   });
 });

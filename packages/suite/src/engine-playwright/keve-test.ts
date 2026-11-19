@@ -38,7 +38,7 @@ import { activeBrowserCacheDir } from '../core/browserCache.js';
 // 这里只负责在启动浏览器前把 storageState 就位（global-setup 已写好文件）。
 import { resolveStorageStatePath, writeStorageState, readInjectedCookies } from './global-setup.js';
 import { beginGoalShotDiffCapture, drainGoalShotDiff, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
-import { isAssertionFailure, isEnvironmentBlockedError, inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
+import { isAssertionFailure, isEnvironmentBlockedError, isSsoRedirectUrl, inferConclusionFromDoneText } from '../core/judge/goal-heuristics.js';
 import { withLlmContextHeaders } from '../core/llm-context.js';
 
 export { expect };
@@ -269,6 +269,11 @@ export const test = base.extend<KeveFixture>({
 
       // ── Hand off to agent: agent does Re-Act (OR shortcut to blocked if fnBlocked) ──
       const currentUrl = page.url();
+      if (isSsoRedirectUrl(currentUrl)) {
+        fnBlocked = true;
+        fnError = `页面被重定向到SSO统一认证登录页（${currentUrl}），无法访问目标页面`;
+        console.log(`[keveGoal] 🚫 "${options.step}" BLOCKED — SSO redirect: ${currentUrl}`);
+      }
       const learnedHint = learnedActions.getHint(options.step, currentUrl);
       let reactResult: any;
 
