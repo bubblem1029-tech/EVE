@@ -9,18 +9,31 @@ function createDom(html: string) {
     runScripts: 'outside-only',
   });
   const win = dom.window as any;
-  win.getComputedStyle = () => ({ visibility: 'visible', display: 'block', opacity: '1' });
-  win.HTMLElement.prototype.getBoundingClientRect = () => ({
-    width: 100,
-    height: 100,
-    top: 0,
-    left: 0,
-    right: 100,
-    bottom: 100,
-    x: 0,
-    y: 0,
-    toJSON: () => ({}),
+  win.getComputedStyle = (el: any) => ({
+    visibility: el?.style?.visibility || 'visible',
+    display: el?.style?.display || 'block',
+    opacity: el?.style?.opacity || '1',
   });
+  win.HTMLElement.prototype.getBoundingClientRect = function () {
+    let node: any = this;
+    while (node) {
+      if (node.style?.display === 'none' || node.hidden) {
+        return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) };
+      }
+      node = node.parentElement;
+    }
+    return {
+      width: 100,
+      height: 100,
+      top: 0,
+      left: 0,
+      right: 100,
+      bottom: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    };
+  };
   return dom;
 }
 
@@ -50,6 +63,36 @@ describe('pageReadySource', () => {
     const result = await run('<div><header>Dashboard navigation</header><main></main></div>');
     expect(result.ready).toBe(false);
     expect(result.reason).toBe('BLANK_APP_ROOT');
+  });
+
+  it('ignores hidden dialog text inside the app root', async () => {
+    const result = await run(
+      '<div id="app"><div class="el-dialog" style="display:none"><span>浏览器提示</span></div></div>',
+    );
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('BLANK_APP_ROOT');
+    expect(result.textLength).toBe(0);
+  });
+
+  it('ignores aria-hidden placeholder text inside the app root', async () => {
+    const result = await run('<div id="app"><div aria-hidden="true">浏览器提示</div></div>');
+    expect(result.ready).toBe(false);
+    expect(result.textLength).toBe(0);
+  });
+
+  it('does not count chrome media as business content', async () => {
+    const result = await run('<div id="app"><header><img src="logo.png" /></header><div class="content"></div></div>');
+    expect(result.ready).toBe(false);
+    expect(result.visibleMedia).toBe(0);
+  });
+
+  it('detects a page-level loader that lives outside the app root', async () => {
+    const result = await run(
+      '<div id="app"><div class="content"></div></div><div class="loading-wrapper"><span class="loading-text">加载中...</span></div>',
+    );
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('PERSISTENT_LOADING');
+    expect(result.loadingMarkers).toBeGreaterThan(0);
   });
 
   it('detects a local spinner inside the business region', async () => {

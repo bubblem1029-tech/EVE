@@ -108,6 +108,70 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
     return String((el && (el.innerText || el.textContent)) || "").trim();
   }
 
+  function inChrome(el) {
+    try { return !!(el && el.closest && el.closest("header, nav, aside, footer, [role=banner], [role=navigation], [role=contentinfo]")); }
+    catch (e) { return false; }
+  }
+
+  function hiddenFromAT(el) {
+    try { return !!(el && el.closest && el.closest("[aria-hidden=true], [hidden]")); }
+    catch (e) { return false; }
+  }
+
+  // Only visible business text counts. Header/nav labels, hidden dialogs and
+  // zero-size nodes must not be able to make an empty content area look ready.
+  function readableText(root) {
+    var parts = [];
+    var blocks = 0;
+    if (!root) return { text: "", blocks: 0 };
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      var value = String(node.nodeValue || "").replace(/\s+/g, " ").trim();
+      if (!value) continue;
+      var el = node.parentElement;
+      if (!el || !visible(el)) continue;
+      if (inChrome(el) || hiddenFromAT(el)) continue;
+      var tag = String(el.tagName || "").toLowerCase();
+      if (tag === "script" || tag === "style" || tag === "noscript" || tag === "template") continue;
+      parts.push(value);
+      blocks += 1;
+      if (blocks >= 300) break;
+    }
+    return { text: parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 4000), blocks: blocks };
+  }
+
+  function collectLoading(root) {
+    var body = document.body || root || document;
+    var viewportArea = Math.max(1, (window.innerWidth || 0) * (window.innerHeight || 0));
+    var rootArea = 1;
+    try { var rootBox = root && root.getBoundingClientRect(); rootArea = Math.max(1, rootBox.width * rootBox.height); } catch (e) { rootArea = viewportArea; }
+    var selector = "[aria-busy=true], [role=progressbar], .el-loading-mask, .ks-loading-mask, .ant-spin-spinning, [class*=loading-mask], [class*=skeleton], [class*=shimmer], [class*=loading], [class*=spinner], [class*=spin]";
+    var structural = "[aria-busy=true], [role=progressbar], .el-loading-mask, .ks-loading-mask, .ant-spin-spinning, [class*=loading-mask], [class*=skeleton], [class*=shimmer], [class*=spinner], [class*=spin]";
+    var total = 0;
+    var blocking = 0;
+    var candidates = queryAll(body, selector);
+    for (var i = 0; i < candidates.length; i += 1) {
+      var el = candidates[i];
+      if (!visible(el) || inChrome(el) || hiddenFromAT(el)) continue;
+      var box = el.getBoundingClientRect();
+      var area = box.width * box.height;
+      if (area < 16) continue;
+      var value = textOf(el);
+      var looksLikeLoader = matches(el, structural)
+        || area >= viewportArea * 0.5
+        || /加载中|正在加载|loading/i.test(value);
+      if (!looksLikeLoader) continue;
+      // A tiny icon with a loading-ish class is not a page-level loader.
+      if (area < 64 && !matches(el, "[role=progressbar], [aria-busy=true]")) continue;
+      total += 1;
+      // A mask covering most of the viewport blocks the whole page. A loader
+      // scoped to one panel (e.g. a left tree) must not hide page-level content.
+      if (area >= viewportArea * 0.4 || (root.contains(el) && area >= rootArea * 0.4)) blocking += 1;
+    }
+    return { total: total, blocking: blocking };
+  }
+
   function rootLabel(root) {
     if (!root) return "";
     if (root.id) return "#" + root.id;
@@ -137,7 +201,7 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
     return null;
   }
 
-  function fingerprint(root, text, media, canvases) {
+  function fingerprint(root, textLength, blocks, media, canvases) {
     var boxes = [];
     var children = Array.prototype.slice.call(root.children || []).slice(0, 20);
     for (var i = 0; i < children.length; i += 1) {
@@ -145,7 +209,7 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
       var box = children[i].getBoundingClientRect();
       boxes.push(Math.round(box.width) + "x" + Math.round(box.height));
     }
-    return text.length + "|" + media + "|" + canvases.length + "|" + boxes.join(",");
+    return textLength + "|" + blocks + "|" + media + "|" + canvases.length + "|" + boxes.join(",");
   }
 
   function snapshot() {
@@ -156,38 +220,10 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
     if (queryAll(document, "input[type=password]").some(visible)) {
       return { ready: false, reason: "LOGIN_REQUIRED", textLength: 0, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
     }
-    var text = textOf(root);
+    var visibleText = readableText(root);
+    var text = visibleText.text;
     if (/^(?:403|404|500|页面不存在|无权限访问|系统异常|服务不可用)(?:\\s|$|[，。！!])/i.test(text)) {
       return { ready: false, reason: "ERROR_PAGE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
-    }
-    var box = root.getBoundingClientRect();
-    var area = box.width * box.height;
-    var loadingSelector = "[aria-busy=true], [role=progressbar], .el-loading-mask, .ks-loading-mask, .ant-spin-spinning, [class*=loading], [class*=spinner], [class*=spin], [class*=skeleton], [class*=shimmer]";
-    var loading = /^(?:加载中|正在加载|loading)[.。…\\s]*$/i.test(text);
-    if (!loading) {
-      var masks = [root].concat(queryAll(root, loadingSelector));
-      for (var k = 0; k < masks.length; k += 1) {
-        if (!matches(masks[k], loadingSelector)) continue;
-        if (!visible(masks[k])) continue;
-        var maskBox = masks[k].getBoundingClientRect();
-        if (maskBox.width * maskBox.height >= area * 0.5) { loading = true; break; }
-      }
-    }
-    if (loading) {
-      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 1, fingerprint: "", checkedRoot: rootLabel(root) };
-    }
-    var markerCandidates = (matches(root, loadingSelector) ? [root] : []).concat(queryAll(root, loadingSelector));
-    var markers = markerCandidates.filter(function (el) {
-      if (!visible(el)) return false;
-      if (el.closest && el.closest("header, nav, aside, footer")) return false;
-      var markerBox = el.getBoundingClientRect();
-      if (markerBox.width * markerBox.height < 64) return false;
-      var markerText = textOf(el);
-      if (markerText.length > 40 && !/加载中|正在加载|loading/i.test(markerText)) return false;
-      return true;
-    });
-    if (markers.length) {
-      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: markers.length, fingerprint: "", checkedRoot: rootLabel(root) };
     }
     if (options.readySelector) {
       var keys = queryAll(root, options.readySelector);
@@ -196,10 +232,19 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
         return { ready: false, reason: "KEY_CONTENT_NOT_VISIBLE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
       }
     }
-    var canvases = queryAll(root, "canvas").filter(visible);
-    var media = queryAll(root, "svg, img, video").filter(visible).length;
-    var print = fingerprint(root, text, media, canvases);
+    var businessVisible = function (el) { return visible(el) && !inChrome(el) && !hiddenFromAT(el); };
+    var canvases = queryAll(root, "canvas").filter(businessVisible);
+    var media = queryAll(root, "svg, img, video").filter(businessVisible).length;
+    var print = fingerprint(root, text.length, visibleText.blocks, media, canvases);
     var content = text.length >= options.minTextLength || media > 0;
+    // Page-level loaders and router transition overlays often live outside the
+    // app root, so loading must be checked on the whole document.
+    var loading = collectLoading(root);
+    var bodyText = String((document.body && document.body.innerText) || "").trim();
+    if (/^(?:加载中|正在加载|loading)[.。…\\s]*$/i.test(bodyText)) { loading.total += 1; loading.blocking += 1; }
+    if (loading.blocking || (!content && loading.total)) {
+      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: media, canvasVisible: canvases.length > 0, canvasUnverified: false, loadingMarkers: loading.total, fingerprint: "", checkedRoot: rootLabel(root) };
+    }
     if (!content && canvases.length) {
       if (options.allowCanvas) {
         return { ready: true, reason: "CONTENT_VISIBLE", textLength: text.length, visibleMedia: media, canvasVisible: true, canvasUnverified: true, loadingMarkers: 0, fingerprint: print, checkedRoot: rootLabel(root) };
