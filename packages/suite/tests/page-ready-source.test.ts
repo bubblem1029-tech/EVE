@@ -46,6 +46,19 @@ describe('pageReadySource', () => {
     expect(result.reason).toBe('BLANK_APP_ROOT');
   });
 
+  it('does not let header text hide a blank business region', async () => {
+    const result = await run('<div><header>Dashboard navigation</header><main></main></div>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('BLANK_APP_ROOT');
+  });
+
+  it('detects a local spinner inside the business region', async () => {
+    const result = await run('<main><div class="loading-spinner"></div><div>KPI cards</div></main>');
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('PERSISTENT_LOADING');
+    expect(result.loadingMarkers).toBeGreaterThan(0);
+  });
+
   it('detects persistent loading', async () => {
     const result = await run('<div id="app"><div class="el-loading-mask"></div></div>');
     expect(result.ready).toBe(false);

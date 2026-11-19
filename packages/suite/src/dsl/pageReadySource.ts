@@ -40,6 +40,8 @@ export interface PageReadyResult {
   visibleMedia: number;
   canvasVisible: boolean;
   canvasUnverified: boolean;
+  loadingMarkers: number;
+  fingerprint: string;
   stableSamples: number;
   finalUrl: string;
   durationMs: number;
@@ -121,29 +123,46 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
       }
       return null;
     }
-    candidates = queryAll(document, "#app, #root, main, [role=main]");
+    // Prefer the business content landmark, so header/nav text cannot make a
+    // still-loading dashboard look ready.
+    candidates = queryAll(document, "main, [role=main], #app main, #root main");
     for (var j = 0; j < candidates.length; j += 1) {
       if (visible(candidates[j])) return candidates[j];
+    }
+    candidates = queryAll(document, "#app, #root");
+    for (var k = 0; k < candidates.length; k += 1) {
+      if (visible(candidates[k])) return candidates[k];
     }
     if (!candidates.length) return document.body;
     return null;
   }
 
+  function fingerprint(root, text, media, canvases) {
+    var boxes = [];
+    var children = Array.prototype.slice.call(root.children || []).slice(0, 20);
+    for (var i = 0; i < children.length; i += 1) {
+      if (!visible(children[i])) continue;
+      var box = children[i].getBoundingClientRect();
+      boxes.push(Math.round(box.width) + "x" + Math.round(box.height));
+    }
+    return text.length + "|" + media + "|" + canvases.length + "|" + boxes.join(",");
+  }
+
   function snapshot() {
     var root = findRoot();
     if (!root || !visible(root)) {
-      return { ready: false, reason: "APP_ROOT_NOT_VISIBLE", textLength: 0, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "APP_ROOT_NOT_VISIBLE", textLength: 0, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
     }
     if (queryAll(document, "input[type=password]").some(visible)) {
-      return { ready: false, reason: "LOGIN_REQUIRED", textLength: 0, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "LOGIN_REQUIRED", textLength: 0, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
     }
     var text = textOf(root);
     if (/^(?:403|404|500|页面不存在|无权限访问|系统异常|服务不可用)(?:\\s|$|[，。！!])/i.test(text)) {
-      return { ready: false, reason: "ERROR_PAGE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "ERROR_PAGE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
     }
     var box = root.getBoundingClientRect();
     var area = box.width * box.height;
-    var loadingSelector = "[aria-busy=true], [role=progressbar], .el-loading-mask, .ks-loading-mask, .ant-spin-spinning";
+    var loadingSelector = "[aria-busy=true], [role=progressbar], .el-loading-mask, .ks-loading-mask, .ant-spin-spinning, [class*=loading], [class*=spinner], [class*=spin], [class*=skeleton], [class*=shimmer]";
     var loading = /^(?:加载中|正在加载|loading)[.。…\\s]*$/i.test(text);
     if (!loading) {
       var masks = [root].concat(queryAll(root, loadingSelector));
@@ -155,28 +174,42 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
       }
     }
     if (loading) {
-      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 1, fingerprint: "", checkedRoot: rootLabel(root) };
+    }
+    var markerCandidates = (matches(root, loadingSelector) ? [root] : []).concat(queryAll(root, loadingSelector));
+    var markers = markerCandidates.filter(function (el) {
+      if (!visible(el)) return false;
+      if (el.closest && el.closest("header, nav, aside, footer")) return false;
+      var markerBox = el.getBoundingClientRect();
+      if (markerBox.width * markerBox.height < 64) return false;
+      var markerText = textOf(el);
+      if (markerText.length > 40 && !/加载中|正在加载|loading/i.test(markerText)) return false;
+      return true;
+    });
+    if (markers.length) {
+      return { ready: false, reason: "PERSISTENT_LOADING", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: markers.length, fingerprint: "", checkedRoot: rootLabel(root) };
     }
     if (options.readySelector) {
       var keys = queryAll(root, options.readySelector);
       if (matches(root, options.readySelector)) keys.push(root);
       if (!keys.some(visible)) {
-        return { ready: false, reason: "KEY_CONTENT_NOT_VISIBLE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, checkedRoot: rootLabel(root) };
+        return { ready: false, reason: "KEY_CONTENT_NOT_VISIBLE", textLength: text.length, visibleMedia: 0, canvasVisible: false, canvasUnverified: false, loadingMarkers: 0, fingerprint: "", checkedRoot: rootLabel(root) };
       }
     }
     var canvases = queryAll(root, "canvas").filter(visible);
     var media = queryAll(root, "svg, img, video").filter(visible).length;
+    var print = fingerprint(root, text, media, canvases);
     var content = text.length >= options.minTextLength || media > 0;
     if (!content && canvases.length) {
       if (options.allowCanvas) {
-        return { ready: true, reason: "CONTENT_VISIBLE", textLength: text.length, visibleMedia: media, canvasVisible: true, canvasUnverified: true, checkedRoot: rootLabel(root) };
+        return { ready: true, reason: "CONTENT_VISIBLE", textLength: text.length, visibleMedia: media, canvasVisible: true, canvasUnverified: true, loadingMarkers: 0, fingerprint: print, checkedRoot: rootLabel(root) };
       }
-      return { ready: false, reason: "CANVAS_CONTENT_UNVERIFIED", textLength: text.length, visibleMedia: media, canvasVisible: true, canvasUnverified: true, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "CANVAS_CONTENT_UNVERIFIED", textLength: text.length, visibleMedia: media, canvasVisible: true, canvasUnverified: true, loadingMarkers: 0, fingerprint: print, checkedRoot: rootLabel(root) };
     }
     if (!content) {
-      return { ready: false, reason: "BLANK_APP_ROOT", textLength: text.length, visibleMedia: media, canvasVisible: canvases.length > 0, canvasUnverified: false, checkedRoot: rootLabel(root) };
+      return { ready: false, reason: "BLANK_APP_ROOT", textLength: text.length, visibleMedia: media, canvasVisible: canvases.length > 0, canvasUnverified: false, loadingMarkers: 0, fingerprint: print, checkedRoot: rootLabel(root) };
     }
-    return { ready: true, reason: "CONTENT_VISIBLE", textLength: text.length, visibleMedia: media, canvasVisible: canvases.length > 0, canvasUnverified: false, checkedRoot: rootLabel(root) };
+    return { ready: true, reason: "CONTENT_VISIBLE", textLength: text.length, visibleMedia: media, canvasVisible: canvases.length > 0, canvasUnverified: false, loadingMarkers: 0, fingerprint: print, checkedRoot: rootLabel(root) };
   }
 
   return new Promise(function (resolve) {
@@ -186,9 +219,14 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
       result.stableSamples = stable;
       resolve(result);
     }
+    var prevFingerprint = null;
     function tick() {
       last = snapshot();
-      if (last.ready) stable += 1; else stable = 0;
+      if (last.ready) {
+        if (last.fingerprint && last.fingerprint === prevFingerprint) stable += 1;
+        else stable = 1;
+      } else stable = 0;
+      prevFingerprint = last.fingerprint || null;
       if (stable >= options.stableTimes) return finish(last);
       if (Date.now() >= deadline) {
         last.ready = false;
