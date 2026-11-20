@@ -16,7 +16,7 @@
 export function pageOpsSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveOpsSource === "v8") return "cached";
+  if (window.__keveOpsSource === "v9") return "cached";
 
   function locator() {
     if (!window.__keveLocator) throw new Error("[keve] locator 未注入");
@@ -33,6 +33,11 @@ export function pageOpsSource(): string {
   function first(refs) {
     var els = resolve(refs);
     if (!els.length) throw new Error("[keve] 元素未找到: " + JSON.stringify(refs).slice(0, 300));
+    // 多面板/多弹窗残留时，同一个选择器会同时命中隐藏节点与可见节点。
+    // 取第一个可见节点，避免把点击/输入落到 display:none 的那份拷贝上。
+    for (var i = 0; i < els.length; i++) {
+      if (isVisible(els[i])) return els[i];
+    }
     return els[0];
   }
 
@@ -267,7 +272,7 @@ export function pageOpsSource(): string {
       return (0, eval)("(" + expr + ")");
     },
   };
-  window.__keveOpsSource = "v8";
+  window.__keveOpsSource = "v9";
   return "ok";
 })()`;
 }
