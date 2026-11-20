@@ -216,8 +216,15 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
   const out: string[] = [];
   const stepText = String(d.text || op);
   const chain = chainExpr(d.context, ctx);
+  // MOVE_ELEMENT 的断言语义是「被移动的这一行/这棵树」：
+  // 平台把行内装饰元素（复选框、icon）录成了只有 class 一跳的全页断言，
+  // 全页校验会被其它行的同名元素撑爆（如“该行无 icon”其实全页有 57 个）。
+  // 这里把「只有一跳 class」的断言收敛到被移动元素范围内，语义与录制意图一致。
+  const expectations = (d.expectation || []).map((e) =>
+    op === 'MOVE_ELEMENT' ? scopeHoverAssertion(e, d.context) : e,
+  );
   const expLines: string[] = [];
-  for (const e of d.expectation || []) {
+  for (const e of expectations) {
     const a = renderExpectation(e, ctx);
     if (a) expLines.push(a);
   }
@@ -232,7 +239,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
   //   b) 全部 expectation 都是可执行断言。
   // 只要出现 TEXT / 无 type 的「纯文案期望」、或某条断言渲染成 null，等式不成立，
   // expected 就携带了断言覆盖不到的人话语义，必须保留评测阶段交给 Agent，不能短路。
-  const exps = d.expectation || [];
+  const exps = expectations;
   // 注意：必须在补自动断言之前取值 —— 补断言会让 expLines 比 exps 多一条。
   const expectedFullyCovered = expLines.length === exps.length;
 
@@ -269,7 +276,7 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
 
   const expected = autoValueAssertion
     ? `元素${describeChain(d.context)}的输入值等于「${describeValue(d.value, ctx)}」`
-    : expectedTextOf(d.expectation || [], (e) => resolveExpectationValue(e, ctx));
+    : expectedTextOf(expectations, (e) => resolveExpectationValue(e, ctx));
 
   // 点击类步骤把「记录目标」作为结构化元数据下发给引擎，避免运行时再按源码形态反推：
   // Playwright 与 Cypress 生成的定位源码格式不同，统一由编译器产出同一份 target。
@@ -380,7 +387,13 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       const childActions: string[] = [];
       for (const childAction of Array.isArray(d.children) ? d.children : []) {
         const childOp = String(childAction?.operation || '');
-        const childHops = chainExprOrNull(childAction?.context, ctx);
+        // 子动作只记录了行内元素的相对定位（如 input[placeholder=...]），
+        // 但父步骤在 iframe 里时，子动作必须继承父链的 iframe 上下文；
+        // 否则会到主文档里找行内控件，永远落空。
+        const childHops = chainExprOrNull(
+          inheritFrameHops(childAction?.context, d.context),
+          ctx,
+        );
         if (!childHops) continue;
         if (childOp === 'CLICK_ELEMENT') childActions.push(`await engine.click(${childHops});`);
         else if (childOp === 'FORCE_CLICK_ELEMENT') childActions.push(`await engine.forceClick(${childHops});`);
@@ -460,6 +473,17 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
           ? `${varName} = await engine.evaluate(${q(String(expr))});`
           : `await engine.evaluate(${q(String(expr))});`,
       ]);
+      break;
+    }
+    case 'STABILIZE_PAGE': {
+      const rawValue = d.value as any;
+      const options = rawValue && typeof rawValue === 'object'
+        ? (rawValue.value && typeof rawValue.value === 'object' ? rawValue.value : rawValue)
+        : rawValue;
+      if (!options || (typeof options === 'object' && !Object.keys(options).length)) {
+        throw new Error(`STABILIZE_PAGE 缺少稳定化配置: ${stepText}`);
+      }
+      emit([`await engine.stabilizePage(${JSON.stringify(options)});`, ...waitExprs(d)]);
       break;
     }
     case 'SCREEN_SHOT':
@@ -598,7 +622,7 @@ function expectedTextOf(
   const labelOnly: string[] = [];
 
   for (const e of expectations) {
-    const label = String(e.text || '').trim();
+    const label = rewriteLegacyCopy(String(e.text || '')).trim();
     const type = String(e.type || '');
     if (!type || isTextOnlyAssert(type)) {
       if (label) labelOnly.push(label);
@@ -721,7 +745,7 @@ function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
   // 无 type / TEXT：纯「期望文案」载体，只喂 keveGoal.expected，不是断言
   if (!type || isTextOnlyAssert(type)) return null;
 
-  const comment = e.text ? ` // ${e.text}` : '';
+  const comment = e.text ? ` // ${rewriteLegacyCopy(e.text)}` : '';
   const chain = chainExpr(e.context, ctx);
   // 断言值双轨：val 是人话文案（expected 用），valExpr 是脚本里的可执行表达式。
   // 二者必须分开 —— 文案里保留 `${X}` 便于排障，代码里未解析引用必须编译期报错。
@@ -769,21 +793,31 @@ function renderExpectation(e: DslExpectation, ctx: RenderCtx): string | null {
     case 'SCREENSHOT_COMPARE':
     case 'IMAGE_COMPARE': {
       // value 为基线 key（老平台基线 id 可回溯迁移来源）
-      const shotName = String(val || e.text || '').trim() || sanitizeShotKey(e.text || 'baseline');
+      const shotName = String(e.options?.baselineKey || val || e.text || '').trim()
+        || sanitizeShotKey(e.text || 'baseline');
       const shotChain = chainExprOrNull(e.context, ctx);
       const shotKeyExpr = codeLiteral(shotName, 'SCREENSHOT 断言基线 key');
+      const options = e.options && typeof e.options === 'object' ? { ...e.options } : {};
+      if (options.threshold === undefined && options.approvedThresholdPct !== undefined) {
+        options.threshold = Number(options.approvedThresholdPct);
+      }
+      if (options.lastRunThreshold === undefined && options.lastRunThresholdPct !== undefined) {
+        options.lastRunThreshold = Number(options.lastRunThresholdPct);
+      }
+      if (options.captureMode === 'fullPage') options.fullPage = true;
+      const shotOptsExpr = JSON.stringify(options);
       if (shotChain) {
         return [
-          `try { await engine.screenshot(${shotKeyExpr}, ${shotChain}); }`,
+          `try { await engine.expectScreenshot(${shotKeyExpr}, ${shotOptsExpr}, ${shotChain}); }`,
           `catch (_shotErr: any) {`,
           `  if (/timeout|waiting.*locator|not found|no element/i.test(String(_shotErr?.message || ''))) {`,
           `    console.warn('[dsl] 区域截图降级为整页截图:', ${shotKeyExpr}, _shotErr?.message);`,
-          `    await engine.screenshot(${shotKeyExpr});`,
+          `    await engine.expectScreenshot(${shotKeyExpr}, ${JSON.stringify({ ...options, fullPage: true })});`,
           `  } else { throw _shotErr; }`,
           `}`,
         ].join(' ');
       }
-      return `await engine.screenshot(${shotKeyExpr});${comment}`;
+      return `await engine.expectScreenshot(${shotKeyExpr}, ${shotOptsExpr});${comment}`;
     }
     case 'PAGE_READY': {
       const options = e.options && typeof e.options === 'object' ? e.options : {};
@@ -1248,10 +1282,107 @@ function chainExprOrNull(context: DslHop[] | undefined, ctx: RenderCtx): string 
   return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${stringExpr(h.value, ctx, `定位链 ${h.type}`)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
 }
 
+/**
+ * 子动作继承父步骤的 iframe 上下文。
+ *
+ * children 建模只保存「行内元素」这一跳，iframe 信息在父 context 上。
+ * 子动作若自己不带 iframe-url，解析时会退到主文档，行内控件必然找不到。
+ */
+function inheritFrameHops(
+  childContext: DslHop[] | undefined,
+  parentContext: DslHop[] | undefined,
+): DslHop[] | undefined {
+  const child = Array.isArray(childContext) ? childContext : [];
+  if (!child.length) return childContext;
+  if (child.some((h) => String(h?.type || '') === 'iframe-url')) return child;
+  const frames = (Array.isArray(parentContext) ? parentContext : [])
+    .filter((h) => String(h?.type || '') === 'iframe-url');
+  return frames.length ? [...frames, ...child] : child;
+}
+
+/**
+ * MOVE_ELEMENT 的「行内断言」收敛。
+ *
+ * 平台录制时把行内元素（复选框、icon）存成了只有一跳 class 的断言，
+ * 语义上是「这一行里有没有它」，但运行时若按全页求值，其它行的同名元素
+ * 会让 ELEMENT_NOT_EXIST 永远为假。这里把这类断言锚定到当前步骤的定位链。
+ * 只处理「单跳 class」这一种形态，带 selector/includes 锚点的断言保持原样。
+ */
+function scopeHoverAssertion(e: DslExpectation, stepContext: DslHop[] | undefined): DslExpectation {
+  const type = String(e?.type || '');
+  if (type !== 'ELEMENT_EXIST' && type !== 'ELEMENT_NOT_EXIST') return e;
+  const context = Array.isArray(e?.context) ? e.context : [];
+  const singleClass = context.length === 1 && String(context[0]?.type || '') === 'class';
+  const stepHops = Array.isArray(stepContext) ? stepContext : [];
+  if (!singleClass || !stepHops.length) return e;
+  return { ...e, context: [...stepHops, ...context] };
+}
+
 interface CollectedHop {
   type: string;
   value: string;
   index?: number;
+}
+
+/**
+ * 历史 DSL 兼容映射（旧 → 新）。
+ *
+ * 平台里几百条用例的定位链是在旧版 UI 上录制的。AUT 改版后旧选择器/文案直接
+ * 从 DOM 消失，用例会在「确定」之后的空态断言上失败，而这类失败和业务逻辑
+ * 无关。投影期做等价映射，能让存量 DSL 继续可执行，同时保持断言语义不变：
+ *   - `.c-widget-placeholder-text-name` 被 `.c-widget-placeholder` 取代；
+ *   - 空态文案由「开始创建图表吧」改为「手动快速添加」。
+ *
+ * 只做单向映射，不做模糊匹配；映射命中会打一条 debug 日志，便于后续把这些
+ * 用例的源 DSL 正式迁移掉。
+ */
+const LEGACY_SELECTOR_REWRITES: Record<string, string> = {
+  '.c-widget-placeholder-text-name': '.c-widget-placeholder',
+};
+
+const LEGACY_TEXT_REWRITES: Record<string, string> = {
+  开始创建图表吧: '手动快速添加',
+};
+
+function normalizeLegacyHop(hop: CollectedHop): CollectedHop {
+  if (hop.type === 'selector') {
+    const raw = hop.value.trim();
+    const next = LEGACY_SELECTOR_REWRITES[raw] || rewriteClassnameAttr(raw);
+    if (next && next !== hop.value) {
+      console.warn(`[dsl] 兼容映射旧选择器「${hop.value}」→「${next}」`);
+      return { ...hop, value: next };
+    }
+    return hop;
+  }
+  if (hop.type === 'includes' || hop.type === 'text') {
+    const next = rewriteLegacyCopy(hop.value);
+    if (next !== hop.value) console.warn(`[dsl] 兼容映射旧文案「${hop.value}」→「${next}」`);
+    return next !== hop.value ? { ...hop, value: next } : hop;
+  }
+  return hop;
+}
+
+/**
+ * 录制器把 class 选择器写成了属性选择器：`[classname="field-metric-tree"]`。
+ * `classname` 不是真实属性，浏览器永远匹配不到；修正为 `.field-metric-tree`
+ * （多 class 用空格分隔时逐个加点）。
+ */
+function rewriteClassnameAttr(selector: string): string {
+  const m = selector.match(/^\[\s*classname\s*=\s*["']([^"']+)["']\s*\]$/);
+  if (!m) return selector;
+  return m[1].trim().split(/\s+/).filter(Boolean).map((c) => `.${c.replace(/^\.+/, '')}`).join('');
+}
+
+/**
+ * 把旧文案替换为新文案（支持「xxx 开始创建图表吧 yyy」这类嵌在长句里的标签）。
+ * 断言文案、注释、期望描述都走这里，避免评测 Agent 拿着已下线的文案判定失败。
+ */
+function rewriteLegacyCopy(text: string): string {
+  let out = String(text ?? '');
+  for (const [from, to] of Object.entries(LEGACY_TEXT_REWRITES)) {
+    if (out.includes(from)) out = out.split(from).join(to);
+  }
+  return out;
 }
 
 /**
@@ -1277,7 +1408,8 @@ function collectHops(context: DslHop[] | undefined): CollectedHop[] {
     if (type === '' || value === '') continue;
     const idx = h?.index;
     const hasIdx = idx !== undefined && idx !== null && Number(idx) > 0;
-    out.push(hasIdx ? { type, value, index: Number(idx) } : { type, value });
+    const hop: CollectedHop = hasIdx ? { type, value, index: Number(idx) } : { type, value };
+    out.push(normalizeLegacyHop(hop));
   }
   return out;
 }

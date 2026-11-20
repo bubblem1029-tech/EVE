@@ -18,6 +18,12 @@ import { isElementFactory } from '../core/page-object/definePage.js';
 import type { EngineAdapter, WaitForResponseOptions, WaitForResponseResult } from '../core/page-object/engine-types.js';
 import { resolvePageUrl } from '../core/page-object/engine-types.js';
 import {
+  finalizeStabilizePageResult,
+  stabilizePageSource,
+  type StabilizePageOptions,
+  type StabilizePageResult,
+} from '../core/page-object/stabilizePage.js';
+import {
   pageReadySource,
   describePageReadyFailure,
   type PageReadyOptions,
@@ -60,10 +66,18 @@ export { KEVE_ENV, resolvePageUrl } from '../core/page-object/engine-types.js';
 // ─── Playwright Engine Implementation ─────────────────────────────────
 
 export class PlaywrightEngine implements EngineAdapter {
+  private lastStabilizeConfigHash = '';
+
   constructor(private page: Page) { }
 
   async navigate(url: string): Promise<void> {
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    // SPA 落地后先渲染骨架屏，业务内容常常再晚几秒才出现。这里软等待业务内容
+    // 就绪（最长 20s），超时继续由后续断言兜底 —— 否则「打开页面」下一步的
+    // 点击会打在骨架屏上白白超时，再交给 Agent 空转重试。
+    await this.page.evaluate(pageReadySource({ timeoutMs: 20000 })).catch(() => {
+      // 页面确实没有可识别的业务内容（如纯 iframe 页）时不影响后续步骤
+    });
   }
 
   async openPage(page: DefinedPage, overrides?: Record<string, string>): Promise<void> {
@@ -233,12 +247,23 @@ export class PlaywrightEngine implements EngineAdapter {
     return await this.page.evaluate(`(() => (${expression}))()`);
   }
 
+  async stabilizePage(options: StabilizePageOptions = {}): Promise<StabilizePageResult> {
+    const raw = await this.evaluate(stabilizePageSource(options));
+    const result = finalizeStabilizePageResult(options, raw);
+    this.lastStabilizeConfigHash = result.configHash;
+    return result;
+  }
+
   async screenshot(name: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     await this.expectScreenshot(name, {}, ...refs);
   }
 
   async expectScreenshot(key: string, opts: ExpectScreenshotOptions = {}, ...refs: (ElementRef | ElementEntry)[]): Promise<ShotDiffResult> {
     const { test: pwTest } = await import('@playwright/test');
+    const compareOpts: ExpectScreenshotOptions = {
+      ...opts,
+      configHash: opts.configHash || this.lastStabilizeConfigHash,
+    };
     // keveGoal 未开缓冲时（如探索/调试直调），就地开一个临时缓冲，保证结果也能入 attachment
     const owned = !isGoalShotDiffCaptureActive();
     if (owned) beginGoalShotDiffCapture();
@@ -251,7 +276,7 @@ export class PlaywrightEngine implements EngineAdapter {
       //  - 同 key 有其它视口基线 → size_mismatch（尺寸变化不自举，杜绝掩盖变化）
       //  - 候选基线未审核 → baseline_required（不比对不判通过）
       //  - active 基线 → 像素比对（matched / exceeded，超阈值抛 ScreenshotDiffError）
-      const result = compareWithBaseline(key, buf, { threshold: opts.threshold, mask: opts.mask });
+      const result = compareWithBaseline(key, buf, compareOpts);
       // 记录已下沉至 screenshotDiff 模块（成功路径 + 抛错路径均自动记录）
       // 原始截图仍挂附件（证据双保险：报告附件 + test-artifacts 路径）；
       // 测试上下文外（独立验证脚本）test.info() 会抛错 —— 对比功能不受影响，仅跳过附件

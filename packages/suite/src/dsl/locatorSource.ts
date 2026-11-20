@@ -26,7 +26,7 @@
 export function locatorSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveLocatorSource === "v5") return "cached";
+  if (window.__keveLocatorSource === "v6") return "cached";
 
   function classToCss(v) {
     return String(v).trim().split(/\\s+/).filter(Boolean).map(function (c) {
@@ -243,6 +243,12 @@ export function locatorSource(): string {
     var scopeEls = roots && roots.length ? roots : [document];
     var list = Array.isArray(hops) ? hops : [];
     var sawIframe = false;
+    // 文本跳会收敛到「包含该文本的最深元素」。紧随其后的结构跳语义是
+    // 「包含这段文本的行/容器」，新版 DOM 常在文本外再包一层 div，
+    // 只查后代必然落空。这里记住文本跳之前的 scope，后续结构跳同时匹配
+    // 「scope 内包含该文本的容器」与「文本元素的后代」，与 Playwright 侧对齐。
+    var pendingText = null;
+    var scopeBeforeText = null;
 
     for (var i = 0; i < list.length; i += 1) {
       var hop = list[i] || {};
@@ -264,12 +270,57 @@ export function locatorSource(): string {
         if (!doc) return { els: [], status: "cross-origin-iframe" };
         scopeEls = [doc];
         sawIframe = true;
+        pendingText = null;
+        scopeBeforeText = null;
+        continue;
+      }
+
+      if ((type === "includes" || type === "text")) {
+        var textRes = applyHop(scopeEls, hop);
+        if (!textRes.els.length) return textRes;
+        scopeBeforeText = scopeEls;
+        pendingText = normalizeText(hop.value);
+        scopeEls = textRes.els;
+        continue;
+      }
+
+      if (pendingText !== null && scopeBeforeText
+        && (type === "selector" || type === "class" || type === "id" || type === "shadow-dom")) {
+        var wantText = pendingText;
+        pendingText = null;
+        var css = hopToCss(type, hop.value);
+        var containers = [];
+        for (var cIdx = 0; cIdx < scopeBeforeText.length; cIdx += 1) {
+          var cands = queryAllDeep(scopeBeforeText[cIdx], css);
+          for (var c2 = 0; c2 < cands.length; c2 += 1) {
+            if (normalizeText(cands[c2].textContent).indexOf(wantText) >= 0) containers.push(cands[c2]);
+          }
+        }
+        var desc = applyHop(scopeEls, hop).els;
+        var merged = [];
+        var seenMerged = [];
+        var pool = containers.concat(desc);
+        for (var m = 0; m < pool.length; m += 1) {
+          if (seenMerged.indexOf(pool[m]) < 0) { seenMerged.push(pool[m]); merged.push(pool[m]); }
+        }
+        if (!merged.length) return { els: [], status: "no-match" };
+        var mergedIdx = Number(hop.index);
+        if (isFinite(mergedIdx) && mergedIdx > 0) {
+          var pickedOne = merged[mergedIdx - 1];
+          merged = pickedOne ? [pickedOne] : [];
+          if (!merged.length) return { els: [], status: "index-out-of-range" };
+        }
+        scopeEls = merged;
         continue;
       }
 
       var res = applyHop(scopeEls, hop);
       if (!res.els.length) return res;
       scopeEls = res.els;
+      if (type !== "includes" && type !== "text") {
+        pendingText = null;
+        scopeBeforeText = null;
+      }
     }
 
     // iframe 进入后无后续定位跳：兜底取 frame 的 body（与 Playwright 实现一致）
@@ -367,7 +418,7 @@ export function locatorSource(): string {
     accessibleName: accessibleName,
     implicitRole: implicitRole,
   };
-  window.__keveLocatorSource = "v5";
+  window.__keveLocatorSource = "v6";
   return "ok";
 })()`;
 }

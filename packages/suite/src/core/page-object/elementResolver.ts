@@ -41,6 +41,12 @@ function hopToCss(t: string, v: string): string {
 function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: ElementHop[]): Locator {
   let cur: any = scope;
   let lastHop: { type: string; value: any } | null = null;
+  // 文本跳（includes/text）会收敛到「包含该文本的最深元素」。紧随其后的结构跳
+  // （selector/class/label）语义通常是「包含这段文本的行/容器」，而新版 DOM 常把
+  // 文本再包一层 div，单纯查后代必然落空。这里记住文本跳之前的 scope，
+  // 让后续结构跳同时匹配「scope 内包含该文本的容器」与「文本元素的后代」。
+  let pendingText: string | null = null;
+  let scopeBeforeText: any = null;
   for (const hop of hops) {
     const t = String(hop?.type || '');
     const v = hop?.value;
@@ -49,12 +55,32 @@ function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: Eleme
       const css = `iframe[src*="${String(v).replace(/"/g, '\\"')}"]`;
       cur = cur.frameLocator(css);
       lastHop = null; // iframe 本身不产生最终定位，重置
+      pendingText = null;
+      scopeBeforeText = null;
       continue;
     }
     if (t === 'selector' || t === 'id' || t === 'shadow-dom') {
-      cur = cur.locator(hopToCss(t, String(v)));
+      const css = hopToCss(t, String(v));
+      if (pendingText !== null && scopeBeforeText) {
+        const text = pendingText;
+        pendingText = null;
+        const descendant = cur.locator(css);
+        const container = scopeBeforeText.locator(`${css}:has-text(${JSON.stringify(text)})`);
+        cur = container.or(descendant);
+      } else {
+        cur = cur.locator(css);
+      }
     } else if (t === 'class') {
-      cur = cur.locator(classToCss(String(v)));
+      const css = classToCss(String(v));
+      if (pendingText !== null && scopeBeforeText) {
+        const text = pendingText;
+        pendingText = null;
+        const descendant = cur.locator(css);
+        const container = scopeBeforeText.locator(`${css}:has-text(${JSON.stringify(text)})`);
+        cur = container.or(descendant);
+      } else {
+        cur = cur.locator(css);
+      }
     } else if (t === 'includes' || t === 'text') {
       const text = String(v).trim();
       // 「包含文本」语义：用 text= 引擎匹配「包含该文本的最小元素」。
@@ -62,6 +88,8 @@ function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: Eleme
       // 直接文本节点（如 .tab-text「我创建的」）时后代为空，链路永久落空（点击等到超时）。
       // text= 引擎对「自身直挂文本」与「文本在后代元素」两类 DOM 都命中，
       // 且与老行为（点中文本所在叶子）兼容。
+      scopeBeforeText = cur;
+      pendingText = text;
       cur = cur.locator('text=' + text.replace(/\\/g, '\\\\').replace(/"/g, '\\"'));
     } else if (t === 'label') {
       // 平台历史 DSL 的 label 是 HTML 标签选择器：tbody → locator('tbody')。
@@ -82,7 +110,19 @@ function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: Eleme
         'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th',
         'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
       ].includes(label.toLowerCase());
-      cur = knownTag ? cur.locator(label) : cur.getByLabel(label, { exact: false });
+      if (knownTag) {
+        // 与 Cypress 侧 byLabel 对齐：文本跳常收敛到行内最深元素，紧随其后的
+        // 标签跳表达的是「包含该文本的行/单元格」。AUT 新版把行内文本再包一层
+        // div 后，只查后代会被永久判空（hover/click 等到超时），这里并上
+        // 最近祖先，保证「文本 → 行」的定位链不因 DOM 多包一层而失效。
+        const descendant = cur.locator(label);
+        const ancestor = cur.locator(`xpath=ancestor-or-self::${label}[1]`);
+        cur = typeof descendant.or === 'function' ? descendant.or(ancestor) : descendant;
+        pendingText = null;
+      } else {
+        cur = cur.getByLabel(label, { exact: false });
+        pendingText = null;
+      }
     } else {
       throw new Error(`Unknown hop type '${t}' in chain: ${JSON.stringify(hop)}`);
     }
@@ -92,6 +132,10 @@ function applyHops(page: Page, scope: Locator | FrameLocator | Page, hops: Eleme
       cur = cur.nth(idx - 1);
     }
     lastHop = { type: t, value: v };
+    if (t !== 'includes' && t !== 'text') {
+      pendingText = null;
+      scopeBeforeText = null;
+    }
   }
   // iframe 进入后无后续定位跳：兜底取 frame 的 body
   if (!lastHop && hops.some((h) => String(h?.type || '') === 'iframe-url')) {
