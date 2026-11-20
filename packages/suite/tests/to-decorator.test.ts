@@ -214,3 +214,43 @@ describe('toDecorator legacy UI compat', () => {
     expect(expectLine).toContain('iconfont-bi');
   });
 });
+
+describe('toDecorator jQuery :nth(N) compatibility', () => {
+  it('converts a trailing :nth(N) selector into 1-based hop index', () => {
+    const code = render({
+      operation: 'CLICK_ELEMENT',
+      text: '点击日期下拉第0项',
+      context: [{ type: 'selector', value: '.item:nth(0)' }],
+      expectation: [],
+    });
+    const clickLine = code.split('\n').find((line) => line.includes('engine.click(')) || '';
+    expect(clickLine).toContain('value: ".item"');
+    expect(clickLine).toContain('index: 1');
+    expect(clickLine).not.toContain(':nth(');
+  });
+
+  it('converts :nth(N) on a class hop and keeps larger indexes', () => {
+    const code = render({
+      operation: 'CLICK_ELEMENT',
+      text: '点击第二行',
+      context: [{ type: 'class', value: 'row2:nth(1)' }],
+      expectation: [],
+    });
+    const clickLine = code.split('\n').find((line) => line.includes('engine.click(')) || '';
+    expect(clickLine).toContain('value: "row2"');
+    expect(clickLine).toContain('index: 2');
+    expect(clickLine).not.toContain(':nth(');
+  });
+
+  it('leaves normal selectors without :nth() untouched', () => {
+    const code = render({
+      operation: 'CLICK_ELEMENT',
+      text: '点击保存',
+      context: [{ type: 'selector', value: '.btn-primary' }],
+      expectation: [],
+    });
+    const clickLine = code.split('\n').find((line) => line.includes('engine.click(')) || '';
+    expect(clickLine).toContain('value: ".btn-primary"');
+    expect(clickLine).not.toContain('index:');
+  });
+});

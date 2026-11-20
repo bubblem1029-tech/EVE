@@ -16,12 +16,19 @@ function classToCss(v: string): string {
   return String(v).trim().split(/\s+/).map((c) => `.${c.replace(/^\.+/, '')}`).join('');
 }
 
+/** jQuery `:nth(N)` 伪类兜底：不是合法 CSS，locator() 会抛 SyntaxError。
+ *  投影期（toDecorator）已把尾部形态转成 1-based index，这里处理中间形态和
+ *  未经新投影的存量 spec：`:nth(N)` → `:nth-child(N+1)`（jQuery 0-based → CSS 1-based）。 */
+function stripJqueryNth(css: string): string {
+  return css.replace(/:nth\(\s*(\d+)\s*\)/gi, (_m, d) => `:nth-child(${Number(d) + 1})`);
+}
+
 /** hop → css 片段：selector 原样；id 补 #；shadow-dom 宿主按 class 定位（Playwright css 自动穿透 open shadow root） */
 function hopToCss(t: string, v: string): string {
-  if (t === 'selector') return v;
+  if (t === 'selector') return stripJqueryNth(v);
   if (t === 'id') return `#${v.replace(/^#/, '')}`;
-  if (t === 'shadow-dom') return /^[.#[]/.test(v) ? v : classToCss(v);
-  return classToCss(v);
+  if (t === 'shadow-dom') return stripJqueryNth(/^[.#[]/.test(v) ? v : classToCss(v));
+  return stripJqueryNth(classToCss(v));
 }
 
 /**

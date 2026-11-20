@@ -26,7 +26,8 @@
 export function locatorSource(): string {
   return `(() => {
   "use strict";
-  if (window.__keveLocatorSource === "v6") return "cached";
+  if (window.__keveLocatorSource === "v7") return "cached";
+  window.__keveLocatorSource = "v7";
 
   function classToCss(v) {
     return String(v).trim().split(/\\s+/).filter(Boolean).map(function (c) {
@@ -34,12 +35,18 @@ export function locatorSource(): string {
     }).join("");
   }
 
+  function stripJqueryNth(css) {
+    return String(css).replace(/:nth\\(\\s*(\\d+)\\s*\\)/gi, function (_m, d) {
+      return ":nth-child(" + (Number(d) + 1) + ")";
+    });
+  }
+
   function hopToCss(type, value) {
-    if (type === "selector") return String(value);
-    if (type === "id") return "#" + String(value).replace(/^#/, "");
-    if (type === "shadow-dom") return /^[.#[]/.test(String(value))
-      ? String(value) : classToCss(value);
-    return classToCss(value);
+    if (type === "selector") return stripJqueryNth(value);
+    if (type === "id") return stripJqueryNth("#" + String(value).replace(/^#/, ""));
+    if (type === "shadow-dom") return stripJqueryNth(/^[.#[]/.test(String(value))
+      ? String(value) : classToCss(value));
+    return stripJqueryNth(classToCss(value));
   }
 
   function queryAll(root, css) {
@@ -418,7 +425,7 @@ export function locatorSource(): string {
     accessibleName: accessibleName,
     implicitRole: implicitRole,
   };
-  window.__keveLocatorSource = "v6";
+  window.__keveLocatorSource = "v7";
   return "ok";
 })()`;
 }

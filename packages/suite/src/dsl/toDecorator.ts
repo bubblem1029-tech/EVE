@@ -1344,22 +1344,44 @@ const LEGACY_TEXT_REWRITES: Record<string, string> = {
   开始创建图表吧: '手动快速添加',
 };
 
+/**
+ * 老录制器把「取第 N 个」写进 selector 的 jQuery 伪类 `:nth(N)`（0-based）。
+ * 该伪类不是合法 CSS：Playwright locator() 会直接抛 SyntaxError，Cypress
+ * querySelectorAll 吞异常返回空集 —— 两条路都会让确定性步骤落空、退化成
+ * Agent Re-Act 兜底。抽取出来转成平台统一的 1-based `hop.index`，复用既有
+ * 的 `.nth(index-1)` 收敛语义，无需改库里的存量 DSL。
+ *
+ * 只处理「CSS 段 + 单个尾部 :nth(N)」这种录制器形态；复杂复合选择器里嵌
+ * :nth() 的交给运行时 hopToCss 的正则兜底，避免误切 `:not()` 等内容。
+ */
+function normalizeJqueryNth(hop: CollectedHop): CollectedHop {
+  if (hop.type !== 'selector' && hop.type !== 'class' && hop.type !== 'shadow-dom') return hop;
+  const m = hop.value.match(/^(.*?):nth\(\s*(\d+)\s*\)\s*$/i);
+  if (!m) return hop;
+  const css = m[1].trim();
+  const n = Number(m[2]);
+  if (!css || !Number.isInteger(n) || n < 0) return hop;
+  const next: CollectedHop = { ...hop, value: css, index: n + 1 };
+  console.warn(`[dsl] 兼容 jQuery 伪类「${hop.value}」→ selector「${css}」+ index ${next.index}`);
+  return next;
+}
+
 function normalizeLegacyHop(hop: CollectedHop): CollectedHop {
   if (hop.type === 'selector') {
     const raw = hop.value.trim();
     const next = LEGACY_SELECTOR_REWRITES[raw] || rewriteClassnameAttr(raw);
     if (next && next !== hop.value) {
       console.warn(`[dsl] 兼容映射旧选择器「${hop.value}」→「${next}」`);
-      return { ...hop, value: next };
+      return normalizeJqueryNth({ ...hop, value: next });
     }
-    return hop;
+    return normalizeJqueryNth(hop);
   }
   if (hop.type === 'includes' || hop.type === 'text') {
     const next = rewriteLegacyCopy(hop.value);
     if (next !== hop.value) console.warn(`[dsl] 兼容映射旧文案「${hop.value}」→「${next}」`);
     return next !== hop.value ? { ...hop, value: next } : hop;
   }
-  return hop;
+  return normalizeJqueryNth(hop);
 }
 
 /**
