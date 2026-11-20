@@ -35,8 +35,8 @@ export interface ShotDiffRegion extends ShotDiffRect {
 
 export interface ShotDiffResult {
     key: string;
-    /** matched=比对一致（active 基线）｜exceeded=超阈值（抛错）｜baseline_required=无基线/候选未审核（不算通过）｜size_mismatch=尺寸变化不自举 */
-    status: 'matched' | 'exceeded' | 'baseline_required' | 'size_mismatch';
+    /** matched=一致｜exceeded=双基线均超阈值（抛错）｜baseline_drift=偏离审核基线但和上次一致｜last_run_anomaly=符合基线但和上次不一致｜baseline_required=无基线/候选未审核｜size_mismatch=尺寸变化不自举 */
+    status: 'matched' | 'exceeded' | 'baseline_drift' | 'last_run_anomaly' | 'baseline_required' | 'size_mismatch';
     /** 差异率（%，全图像素口径）；baseline_required / size_mismatch 时为 null（不是 0） */
     diffRatio: number | null;
     threshold: number;
@@ -50,6 +50,15 @@ export interface ShotDiffResult {
     env: string;
     viewport: string;
     regions: ShotDiffRegion[];
+    /** 与上一次执行的截图比对（dual/lastRun 模式） */
+    lastRunStatus?: 'matched' | 'exceeded' | 'missing' | 'size_mismatch' | 'config_changed';
+    lastRunDiffRatio?: number | null;
+    lastRunThreshold?: number;
+    lastRunBaselinePath?: string;
+    lastRunActualPath?: string;
+    lastRunDiffPath?: string;
+    /** 本次使用的稳定化配置指纹；与 last-run meta 不一致时不复用历史截图 */
+    configHash?: string;
     /** 供报告/AI 复核的一句话结论 */
     message: string;
     comparedAt: string;
@@ -62,6 +71,12 @@ export interface ExpectScreenshotOptions {
     fullPage?: boolean;
     /** 临时掩码（本次生效；持久掩码在基线 meta.masks） */
     mask?: ShotDiffRect[];
+    /** approved=仅审核基线｜lastRun=仅上次执行｜dual=两者都算（推荐监控） */
+    baselineMode?: 'approved' | 'lastRun' | 'dual';
+    /** 与上次执行比较的阈值（%），缺省复用 threshold */
+    lastRunThreshold?: number;
+    /** 稳定化配置指纹；last-run 不一致时返回 config_changed，不产生假差异 */
+    configHash?: string;
 }
 
 /** 超阈值错误：携带完整对比结果，keveGoal 据此短路并透传 attachment */
@@ -119,7 +134,11 @@ export function findBaselineByKeyEnv(key: string, preferWidth?: number, preferHe
     const dir = baselineDir();
     if (!fs.existsSync(dir)) return null;
     let candidates: string[] = [];
-    try { candidates = fs.readdirSync(dir).filter((f: string) => f.startsWith(prefix) && f.endsWith('.png')); } catch { return null; }
+    try {
+        candidates = fs.readdirSync(dir).filter(
+            (f: string) => f.startsWith(prefix) && f.endsWith('.png') && !f.endsWith('.last.png'),
+        );
+    } catch { return null; }
     if (candidates.length === 0) return null;
     const exact = preferWidth && preferHeight
         ? candidates.find((f: string) => f === `${prefix}${preferWidth}x${preferHeight}.png`)
@@ -370,9 +389,55 @@ function sizeMismatchResult(key: string, png: Buffer, paths: BaselinePaths, sibl
  * 有基线：像素对比 → matched（≤阈值，pass）/ exceeded（>阈值，抛 ScreenshotDiffError）。
  * 尺寸不一致按重叠区对比并在 message 中注明（视口不变的常规场景不受影响）。
  */
-export function compareWithBaseline(key: string, png: Buffer, opts?: { threshold?: number; mask?: ShotDiffRect[] }): ShotDiffResult {
+export function compareWithBaseline(key: string, png: Buffer, opts?: ExpectScreenshotOptions): ShotDiffResult {
     const actualImg = decodePng(png);
     const paths = resolveBaselinePaths(key, actualImg.width, actualImg.height);
+    const baselineMode = opts?.baselineMode || 'approved';
+    const configHash = opts?.configHash || '';
+    if (baselineMode === 'lastRun') {
+        const lastRun = compareWithLastRun(key, png, {
+            threshold: opts?.threshold ?? defaultThreshold(),
+            lastRunThreshold: opts?.lastRunThreshold,
+            configHash,
+            mask: opts?.mask,
+        });
+        const status: ShotDiffResult['status'] = (lastRun.status === 'missing' || lastRun.status === 'config_changed')
+            ? 'baseline_required'
+            : lastRun.status;
+        const result: ShotDiffResult = {
+            key,
+            status,
+            diffRatio: lastRun.diffRatio,
+            threshold: lastRun.threshold,
+            baselineVersion: 0,
+            baselinePath: lastRun.baselinePath,
+            actualPath: lastRun.actualPath,
+            diffPath: lastRun.diffPath,
+            env: paths.env,
+            viewport: paths.viewport,
+            regions: [],
+            lastRunStatus: lastRun.status,
+            lastRunDiffRatio: lastRun.diffRatio,
+            lastRunThreshold: lastRun.threshold,
+            lastRunBaselinePath: lastRun.baselinePath,
+            lastRunActualPath: lastRun.actualPath,
+            lastRunDiffPath: lastRun.diffPath,
+            configHash,
+            message: lastRun.status === 'missing'
+                ? '没有可用的上次执行截图：本次已保存为 last-run 快照，下次执行开始比对'
+                : lastRun.status === 'config_changed'
+                    ? '稳定化配置已变化：旧 last-run 快照不复用，本次已保存新快照'
+                    : `上次结果比对：差异率 ${lastRun.diffRatio === null ? '未知' : fmtPct(lastRun.diffRatio)}，阈值 ${fmtPct(lastRun.threshold)}`,
+            comparedAt: new Date().toISOString(),
+        };
+        saveLastRunSnapshot(key, png, configHash);
+        if (result.status === 'exceeded') {
+            recordShotDiff(result);
+            throw new ScreenshotDiffError(result);
+        }
+        recordShotDiff(result);
+        return result;
+    }
     if (!fs.existsSync(paths.pngPath)) {
         // 尺寸变化（同 key+env 已有其它视口基线）→ 不自动自举成新候选掩盖差异
         const sibling = findBaselineByKeyEnv(key, actualImg.width, actualImg.height);
@@ -416,15 +481,149 @@ export function compareWithBaseline(key: string, png: Buffer, opts?: { threshold
         message: '',
         comparedAt: new Date().toISOString(),
     };
+
+    const lastRunThreshold = opts?.lastRunThreshold;
+    if (baselineMode === 'dual') {
+        const lastRun = compareWithLastRun(key, png, {
+            threshold,
+            lastRunThreshold,
+            configHash,
+            mask: opts?.mask,
+        });
+        result.lastRunStatus = lastRun.status;
+        result.lastRunDiffRatio = lastRun.diffRatio;
+        result.lastRunThreshold = lastRun.threshold;
+        result.lastRunBaselinePath = lastRun.baselinePath;
+        result.lastRunActualPath = lastRun.actualPath;
+        result.lastRunDiffPath = lastRun.diffPath;
+        result.configHash = configHash;
+
+        if (result.status === 'matched' && lastRun.status === 'exceeded') {
+            result.status = 'last_run_anomaly';
+            result.message = `当前截图符合审核基线，但与上次执行差异 ${fmtPct(lastRun.diffRatio || 0)} 超过阈值 ${fmtPct(lastRun.threshold)}（可能上次快照异常，建议复核）`;
+        } else if (result.status === 'exceeded' && lastRun.status === 'matched') {
+            result.status = 'baseline_drift';
+            result.message = `当前截图与上次执行一致，但偏离审核基线（差异率 ${fmtPct(result.diffRatio || 0)} > 阈值 ${fmtPct(threshold)}）；可能是渐进变化，请复核并更新基线`;
+        }
+        saveLastRunSnapshot(key, png, configHash);
+    }
     if (result.status === 'matched') {
         result.message = `截图对比一致：差异率 ${fmtPct(diffRatio)} ≤ 阈值 ${fmtPct(threshold)}（基线 v${result.baselineVersion}，key=${key}）`;
-    } else {
+    } else if (result.status === 'exceeded') {
         result.message = `截图对比不一致：差异率 ${fmtPct(diffRatio)} 超过阈值 ${fmtPct(threshold)}（基线 v${result.baselineVersion}，key=${key}${regionNote}）${baseNote}`;
         recordShotDiff(result); // 抛错前记录：exceeded 证据也必须进 goal 缓冲 → attachment
         throw new ScreenshotDiffError(result);
     }
     recordShotDiff(result);
     return result;
+}
+
+interface LastRunComparison {
+    status: NonNullable<ShotDiffResult['lastRunStatus']>;
+    diffRatio: number | null;
+    threshold: number;
+    baselinePath: string;
+    actualPath: string;
+    diffPath: string;
+}
+
+function lastRunPaths(key: string, width: number, height: number): {
+    pngPath: string;
+    metaPath: string;
+    env: string;
+    viewport: string;
+} {
+    const base = resolveBaselinePaths(key, width, height);
+    return {
+        pngPath: base.pngPath.replace(/\.png$/, '.last.png'),
+        metaPath: base.metaPath.replace(/\.json$/, '.last.json'),
+        env: base.env,
+        viewport: base.viewport,
+    };
+}
+
+function compareWithLastRun(
+    key: string,
+    png: Buffer,
+    opts: {
+        threshold: number;
+        lastRunThreshold?: number;
+        configHash: string;
+        mask?: ShotDiffRect[];
+    },
+): LastRunComparison {
+    const actualImg = decodePng(png);
+    const paths = lastRunPaths(key, actualImg.width, actualImg.height);
+    const threshold = opts.lastRunThreshold ?? opts.threshold;
+    const actualPath = saveArtifact(png, `${sanitizeKey(key)}-lastrun`);
+    if (!fs.existsSync(paths.pngPath)) {
+        return {
+            status: 'missing',
+            diffRatio: null,
+            threshold,
+            baselinePath: paths.pngPath,
+            actualPath,
+            diffPath: '',
+        };
+    }
+    let metaConfigHash = '';
+    try {
+        const meta = JSON.parse(fs.readFileSync(paths.metaPath, 'utf-8'));
+        metaConfigHash = String(meta?.configHash || '');
+    } catch { /* 无 meta 视为未绑定配置 */ }
+    if (opts.configHash && metaConfigHash && opts.configHash !== metaConfigHash) {
+        return {
+            status: 'config_changed',
+            diffRatio: null,
+            threshold,
+            baselinePath: paths.pngPath,
+            actualPath,
+            diffPath: '',
+        };
+    }
+
+    const lastImg = decodePng(fs.readFileSync(paths.pngPath));
+    if (lastImg.width !== actualImg.width || lastImg.height !== actualImg.height) {
+        return {
+            status: 'size_mismatch',
+            diffRatio: null,
+            threshold,
+            baselinePath: paths.pngPath,
+            actualPath,
+            diffPath: '',
+        };
+    }
+    const cmp = comparePixels(lastImg, actualImg, opts.mask || []);
+    const diffRatio = cmp.totalPixels > 0 ? (cmp.diffPixels / cmp.totalPixels) * 100 : 0;
+    const diffPath = cmp.diffPixels > 0
+        ? saveArtifact(renderDiffImage(lastImg, actualImg, cmp), `${sanitizeKey(key)}-lastrun-diff`)
+        : actualPath;
+    const status: 'matched' | 'exceeded' = diffRatio <= threshold ? 'matched' : 'exceeded';
+    return {
+        status,
+        diffRatio: Math.round(diffRatio * 100) / 100,
+        threshold,
+        baselinePath: paths.pngPath,
+        actualPath,
+        diffPath,
+    };
+}
+
+/** 保存本次截图作为下一次 last-run 比对基准；只在审核基线路径调用。 */
+export function saveLastRunSnapshot(
+    key: string,
+    png: Buffer,
+    configHash = '',
+): void {
+    const actualImg = decodePng(png);
+    const paths = lastRunPaths(key, actualImg.width, actualImg.height);
+    fs.mkdirSync(path.dirname(paths.pngPath), { recursive: true });
+    fs.writeFileSync(paths.pngPath, png);
+    fs.writeFileSync(paths.metaPath, JSON.stringify({
+        version: 1,
+        configHash,
+        updatedAt: new Date().toISOString(),
+    }, null, 2));
 }
 
 // ─── Goal 捕获缓冲（engine 写入 → keveGoal 组装 attachment 时读取） ──

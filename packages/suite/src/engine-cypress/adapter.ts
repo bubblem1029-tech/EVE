@@ -14,6 +14,12 @@ import { isElementFactory } from '../core/page-object/definePage.js';
 import type { EngineAdapter, WaitForResponseOptions, WaitForResponseResult } from '../core/page-object/engine-types.js';
 import { resolvePageUrl, KEVE_ENV } from '../core/page-object/engine-types.js';
 import type { ExpectScreenshotOptions } from '../core/judge/screenshotDiff.js';
+import {
+  finalizeStabilizePageResult,
+  stabilizePageSource,
+  type StabilizePageOptions,
+  type StabilizePageResult,
+} from '../core/page-object/stabilizePage.js';
 import type { Cdp } from './cdp.js';
 import { pollUntil } from './cdp.js';
 import {
@@ -69,6 +75,8 @@ function escapeRegExp(s: string): string {
 }
 
 export class CypressEngine implements EngineAdapter {
+  private lastStabilizeConfigHash = '';
+
   constructor(private cdp: Cdp, private bridge: Bridge) { }
 
   // ── AUT 上下文准备 ────────────────────────────────────────────────
@@ -325,6 +333,13 @@ export class CypressEngine implements EngineAdapter {
     return await this.ops(`window.__keveOps.evaluate(${JSON.stringify(expression)})`);
   }
 
+  async stabilizePage(options: StabilizePageOptions = {}): Promise<StabilizePageResult> {
+    const raw = await this.evaluate(stabilizePageSource(options));
+    const result = finalizeStabilizePageResult(options, raw);
+    this.lastStabilizeConfigHash = result.configHash;
+    return result;
+  }
+
   // ── 截图 / 视觉对比 ──────────────────────────────────────────────
 
   async screenshot(name: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
@@ -349,6 +364,9 @@ export class CypressEngine implements EngineAdapter {
         pngBase64,
         threshold: opts.threshold,
         mask: opts.mask,
+        baselineMode: opts.baselineMode,
+        lastRunThreshold: opts.lastRunThreshold,
+        configHash: opts.configHash || this.lastStabilizeConfigHash,
       });
       if (!resp?.ok) {
         if (resp?.code === 'SHOT_DIFF_EXCEEDED') {

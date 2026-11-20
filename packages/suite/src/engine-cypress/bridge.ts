@@ -604,7 +604,13 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
         try {
           const result = payload.create
             ? createBaseline(String(payload.key), png, { threshold: payload.threshold, sourceUrl: payload.sourceUrl })
-            : compareWithBaseline(String(payload.key), png, { threshold: payload.threshold, mask: payload.mask });
+            : compareWithBaseline(String(payload.key), png, {
+                threshold: payload.threshold,
+                mask: payload.mask,
+                baselineMode: payload.baselineMode,
+                lastRunThreshold: payload.lastRunThreshold,
+                configHash: payload.configHash,
+              });
           return { ok: true, result };
         } catch (err: any) {
           if (err instanceof ScreenshotDiffError) {

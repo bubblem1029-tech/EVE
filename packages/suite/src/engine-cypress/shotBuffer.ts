@@ -9,7 +9,7 @@
 
 export interface CyShotDiffResult {
   key: string;
-  status: 'matched' | 'exceeded' | 'baseline_required' | 'size_mismatch';
+  status: 'matched' | 'exceeded' | 'baseline_drift' | 'last_run_anomaly' | 'baseline_required' | 'size_mismatch';
   diffRatio: number | null;
   threshold: number;
   baselineVersion: number;
@@ -21,6 +21,13 @@ export interface CyShotDiffResult {
   viewport: string;
   /** 差异热区（与 core/screenshotDiff.ts 的 ShotDiffResult.regions 同形，始终存在） */
   regions: Array<{ x: number; y: number; w: number; h: number; ratio: number }>;
+  lastRunStatus?: 'matched' | 'exceeded' | 'missing' | 'size_mismatch' | 'config_changed';
+  lastRunDiffRatio?: number | null;
+  lastRunThreshold?: number;
+  lastRunBaselinePath?: string;
+  lastRunActualPath?: string;
+  lastRunDiffPath?: string;
+  configHash?: string;
   message: string;
   comparedAt: string;
 }

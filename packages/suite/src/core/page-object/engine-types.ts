@@ -12,6 +12,7 @@
 import type { ElementRef, ElementEntry, DefinedPage } from './definePage.js';
 import type { ExpectScreenshotOptions, ShotDiffResult } from '../judge/screenshotDiff.js';
 import type { PageReadyOptions, PageReadyResult } from '../../dsl/pageReadySource.js';
+import type { StabilizePageOptions, StabilizePageResult } from './stabilizePage.js';
 
 /** waitForResponse 选项：就绪门语义（软等待 = 超时不阻塞，与 waitForReady.api 一致） */
 export interface WaitForResponseOptions {
@@ -76,6 +77,8 @@ export interface EngineAdapter {
   refresh(): Promise<void>;
   /** 在页面上下文执行 JS 表达式（平台 WRITE_GLOBAL 的 javascript hop） */
   evaluate(expression: string): Promise<any>;
+  /** 页面稳定化（平台 STABILIZE_PAGE）：受控降噪、冻结动画、固定动态文本 */
+  stabilizePage(options?: StabilizePageOptions): Promise<StabilizePageResult>;
   /** 截图并附加到测试报告（平台 SCREEN_SHOT_COMPARE）。⚠ 语义已升级为基线对比断言：
    *  无基线 → 自动建候选基线（pass）；差异率超阈值 → 抛 ScreenshotDiffError（确定性 fail）；
    *  对比结果（差异率/区块/证据图路径）进 keveGoalResult attachment（screenshotDiff 字段） */

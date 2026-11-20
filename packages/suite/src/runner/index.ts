@@ -16,6 +16,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { resolveBrowserCacheDir } from '../core/browserCache.js';
 import { buildCaseIdentity, type CaseGroupNode } from '../core/case-identity.js';
 import { toDecorator, stepExpectedText, type DslStep, type DslVariableRow } from '../dsl/index.js';
@@ -77,6 +78,7 @@ export interface BuildExecEnvOptions {
     backendRoot?: string;
     env?: string;
     targetUrl?: string;
+    baselineDir?: string;
     ssoCookiesJson?: string;
     identitySsoCookies?: Record<string, string>;
     llm?: { baseUrl?: string; model?: string; apiKey?: string };
@@ -121,6 +123,12 @@ export function buildExecEnv({
     KEVE_TARGET_URL: input.targetUrl || '',
     KEVE_STORAGE_STATE: path.join(taskDir, '.auth', 'storage-state.json'),
     KEVE_BROWSER_CACHE_DIR: resolveBrowserCacheDir(),
+    // Screenshot baselines are cross-run state. Keeping them under the task
+    // directory makes every execution start from "baseline_required" and the
+    // last-run comparison can never work.
+    KEVE_BASELINE_DIR: input.baselineDir
+      || process.env.KEVE_BASELINE_DIR
+      || path.join(os.homedir(), '.keve', 'baselines'),
     // 任务入参优先，环境变量仅作为本地调试兜底，避免父进程残留登录态覆盖任务账号。
     KEVE_SSO_COOKIES: input.ssoCookiesJson || process.env.KEVE_SSO_COOKIES || '[]',
     KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {})
