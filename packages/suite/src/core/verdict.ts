@@ -10,6 +10,7 @@ export type Verdict = 'pass' | 'fail' | 'blocked' | 'skipped';
 export type ReasonCode =
   | 'product_assert_failed'
   | 'product_state_changed'
+  | 'product_app_error'
   | 'script_target_missing'
   | 'script_selector_invalid'
   | 'script_evidence_missing'
@@ -49,6 +50,13 @@ const AGENT_TIMEOUT_RE = /Re-Act loop did not achieve|Expected not achieved afte
 const TARGET_RE = /locator.*(?:not found|resolved to)|element.*(?:not found|missing)|selector.*(?:invalid|not found)|strict mode violation|no element|元素.*(?:未找到|缺失)/i;
 const EVIDENCE_RE = /evidence.*missing|missing evidence|截图.*缺失|缺少.*截图|未采集.*证据|no screenshot/i;
 const ASSERT_RE = /expect\(|AssertionError|断言失败|实际显示|页面实际|text mismatch|视觉断言失败/i;
+/** 应用侧运行时异常：页面自身 JS 崩溃，不是网络/环境问题 */
+export const APP_ERROR_RE = /TypeError|ReferenceError|SyntaxError|RangeError|is not a function|Cannot read propert|Cannot set propert|undefined is not|null is not|未捕获异常|uncaught exception|page crashed/i;
+
+/** 供 confidence 层从运行诊断里识别页面 JS 异常 */
+export function looksLikeAppError(text: string): boolean {
+  return APP_ERROR_RE.test(String(text || ''));
+}
 
 function messageOf(input: NormalizeVerdictInput): string {
   if (typeof input.error === 'string') return input.error;
@@ -61,6 +69,8 @@ function detectReasonCode(text: string): ReasonCode | undefined {
   if (CYPRESS_INIT_RE.test(text)) return 'infra_engine_init_failed';
   if (BROWSER_CRASH_RE.test(text)) return 'infra_engine_browser_crashed';
   if (SSO_RE.test(text)) return 'env_sso_blocked';
+  // 注意：应用侧异常只在 env/unknown 分类下生效。script 分类里的 TypeError
+  // 是「脚本自身写错了」，不能被误判成产品缺陷（见 reasonForCategory）。
   if (NETWORK_RE.test(text)) return 'env_network_unreachable';
   if (AGENT_TIMEOUT_RE.test(text)) return 'infra_llm_timeout';
   if (TARGET_RE.test(text)) return 'script_target_missing';
@@ -72,6 +82,11 @@ function detectReasonCode(text: string): ReasonCode | undefined {
 function reasonForCategory(category: string, text: string): ReasonCode {
   const detected = detectReasonCode(text);
   if (detected) return detected;
+  // 应用侧 JS 异常只在 env/unknown 分类下兜底：网络/SSO/引擎等更具体的原因
+  // 已经在 detectReasonCode 里优先命中。
+  if ((category === 'env' || category === 'unknown') && APP_ERROR_RE.test(text)) {
+    return 'product_app_error';
+  }
   switch (category) {
     case 'script':
       return 'script_selector_invalid';

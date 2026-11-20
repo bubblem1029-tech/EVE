@@ -53,6 +53,26 @@ describe('normalizeVerdict', () => {
     expect(normalizeVerdict({ status: 'skipped' }).verdict).toBe('skipped');
   });
 
+  it('maps page runtime errors under env to product_app_error', () => {
+    const result = normalizeVerdict({
+      status: 'failed',
+      errorCategory: 'env',
+      error: "Uncaught TypeError: Cannot read properties of undefined (reading 'filter')",
+    });
+    expect(result.reasonCode).toBe('product_app_error');
+    expect(isInfraReason(result.reasonCode)).toBe(false);
+  });
+
+  it('keeps real network failures under env', () => {
+    const result = normalizeVerdict({
+      status: 'failed',
+      errorCategory: 'env',
+      error: 'net::ERR_CONNECTION_REFUSED at https://example.com',
+    });
+    expect(result.reasonCode).toBe('env_network_unreachable');
+    expect(isInfraReason(result.reasonCode)).toBe(true);
+  });
+
   it('never returns blocked without a reason', () => {
     const result = normalizeVerdict({ status: 'unknown', errorCategory: 'unknown' });
     expect(result.verdict).toBe('blocked');

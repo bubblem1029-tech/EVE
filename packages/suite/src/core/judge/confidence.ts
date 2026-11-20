@@ -11,7 +11,7 @@
  */
 
 import { mergeRuntimeDiagnostics, type RuntimeDiagnostics } from '../../page-agent/diagnostics.js';
-import { normalizeVerdict, type ReasonCode, type Verdict } from '../verdict.js';
+import { looksLikeAppError, normalizeVerdict, type ReasonCode, type Verdict } from '../verdict.js';
 
 // ─── 附件契约 ────────────────────────────────────────────────────────
 
@@ -217,6 +217,36 @@ function normalizeError(error: ClassifyInput['error']): ConfidenceError | undefi
 }
 
 /**
+ * 从运行诊断里提取「应用侧运行时异常」证据。
+ *
+ * Agent 判定 blocked 时 confidence 会把类别定为 env，但 env 默认的
+ * reasonCode 是网络不可达。若页面自身抛了 TypeError/ReferenceError，且网络
+ * 请求全部正常（failed/4xx/5xx 为 0），真正原因就是应用缺陷，不能算环境问题。
+ */
+function appErrorEvidence(diagnostics?: RuntimeDiagnostics): string | undefined {
+  const browser: any = (diagnostics as any)?.browser;
+  const network: any = (diagnostics as any)?.network;
+  // 只有「网络链路是健康的」时，页面 JS 异常才足以排除环境问题；
+  // 存在 failed/4xx/5xx 时仍按环境/网络问题处理，避免把超时误判成产品缺陷。
+  const networkClean = network
+    && Number(network.failed || 0) === 0
+    && Number(network.http4xx || 0) === 0
+    && Number(network.http5xx || 0) === 0;
+  if (!networkClean) return undefined;
+
+  const samples: any[] = Array.isArray(browser?.samples) ? browser.samples : [];
+  const hit = samples.find((sample) => sample
+    && sample.kind !== 'warn'
+    && looksLikeAppError(String(sample.text || '')));
+  if (hit) return String(hit.text || '').replace(/\s+/g, ' ').slice(0, 200);
+
+  if (Number(browser?.uncaughtExceptions || 0) > 0) {
+    return '页面存在未捕获异常（网络请求无失败，4xx/5xx 均为 0）';
+  }
+  return undefined;
+}
+
+/**
  * 分类并生成 confidence 记录。
  *
  * 判定优先级：状态 → Agent 结论 → 错误特征兜底。两端共用同一条链路，
@@ -228,16 +258,21 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
   const agentConclusion = extractAgentConclusion(steps);
   const diagnosticHint = buildDiagnosticHint(attachments);
   const diagnostics = mergeRuntimeDiagnostics(steps.map((s) => s.diagnostics));
+  const appEvidence = appErrorEvidence(diagnostics);
 
   let effectiveCategory: ErrorCategory = 'unknown';
   let skipAI = false;
   let classifiedMessage = '';
 
   const withVerdict = (record: ConfidenceRecordBody, agentResult?: 'pass' | 'fail' | 'blocked' | 'incomplete'): ConfidenceRecord => {
+    // 把页面异常证据并入判定文本：Agent blocked 时 record.error 往往为空，
+    // 只有运行诊断里还留着 TypeError 现场，不并进来就无法纠正 env 的默认归因。
+    const errorText = typeof input.error === 'string' ? input.error : input.error?.message;
+    const verdictError = [errorText, appEvidence].filter(Boolean).join('\n') || undefined;
     const normalized = normalizeVerdict({
       status: input.status,
       errorCategory: record.errorCategory,
-      error: input.error,
+      error: verdictError,
       agentConclusion: agentResult,
       diagnosticHint: record.diagnosticHint,
       data: record.data,
@@ -335,7 +370,9 @@ export function buildConfidenceRecord(input: ClassifyInput): { record: Confidenc
     const thought = effectiveCategory === 'script'
       ? `脚本本身存在代码错误(${classifiedMessage})，测试结果无效`
       : effectiveCategory === 'env'
-        ? `环境/基础设施异常(${classifiedMessage})，非应用功能问题`
+        ? (appEvidence
+            ? `页面运行时异常(${classifiedMessage || appEvidence})，不是网络/环境不可达，按应用缺陷归因`
+            : `环境/基础设施异常(${classifiedMessage})，非应用功能问题`)
         : effectiveCategory === 'visual'
           ? `视觉断言失败(${classifiedMessage})，已由keveAssert评估`
           : effectiveCategory === 'unknown'
