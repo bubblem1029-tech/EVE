@@ -59,6 +59,35 @@ describe('pageReadySource', () => {
     expect(result.reason).toBe('BLANK_APP_ROOT');
   });
 
+  it('finds business content portaled into a dialog outside the app root', async () => {
+    const result = await run(
+      '<div id="app"></div>'
+        + '<div class="el-dialog__wrapper"><div class="el-dialog">'
+        + '<table><tr><td>2026-11-19</td><td>58.00</td></tr></table>'
+        + '</div></div>',
+    );
+    expect(result.ready).toBe(true);
+    expect(result.reason).toBe('CONTENT_VISIBLE');
+    expect(result.textLength).toBeGreaterThan(0);
+  });
+
+  it('falls back to body content when a portal container has no known class', async () => {
+    const result = await run(
+      '<div id="app"></div><div class="custom-portal"><span>看板内容 2026-11-19 58.00</span></div>',
+    );
+    expect(result.ready).toBe(true);
+    expect(result.reason).toBe('CONTENT_VISIBLE');
+  });
+
+  it('keeps blank when only chrome text lives outside the app root', async () => {
+    const result = await run(
+      '<header><nav>首页 项目 设置</nav></header><div id="app"></div>',
+    );
+    expect(result.ready).toBe(false);
+    expect(result.reason).toBe('BLANK_APP_ROOT');
+    expect(result.textLength).toBe(0);
+  });
+
   it('does not let header text hide a blank business region', async () => {
     const result = await run('<div><header>Dashboard navigation</header><main></main></div>');
     expect(result.ready).toBe(false);

@@ -178,27 +178,53 @@ export function pageReadySource(input: PageReadyOptions = {}): string {
     return String(root.tagName || "").toLowerCase();
   }
 
+  function firstVisible(list) {
+    for (var i = 0; i < list.length; i += 1) {
+      if (visible(list[i])) return list[i];
+    }
+    return null;
+  }
+
+  function businessContent(root) {
+    if (!root) return false;
+    var measured = readableText(root);
+    if (measured.text.length >= options.minTextLength) return true;
+    var media = queryAll(root, "svg, img, video, canvas").filter(function (el) {
+      return visible(el) && !inChrome(el) && !hiddenFromAT(el);
+    });
+    return media.length > 0;
+  }
+
   function findRoot() {
-    var candidates;
     if (options.rootSelector) {
-      candidates = queryAll(document, options.rootSelector);
-      for (var i = 0; i < candidates.length; i += 1) {
-        if (visible(candidates[i])) return candidates[i];
+      var configured = queryAll(document, options.rootSelector);
+      for (var i = 0; i < configured.length; i += 1) {
+        if (visible(configured[i])) return configured[i];
       }
       return null;
     }
     // Prefer the business content landmark, so header/nav text cannot make a
     // still-loading dashboard look ready.
-    candidates = queryAll(document, "main, [role=main], #app main, #root main");
-    for (var j = 0; j < candidates.length; j += 1) {
-      if (visible(candidates[j])) return candidates[j];
-    }
-    candidates = queryAll(document, "#app, #root");
-    for (var k = 0; k < candidates.length; k += 1) {
-      if (visible(candidates[k])) return candidates[k];
-    }
-    if (!candidates.length) return document.body;
-    return null;
+    var mainRoot = firstVisible(queryAll(document, "main, [role=main], #app main, #root main"));
+    if (mainRoot && businessContent(mainRoot)) return mainRoot;
+
+    var appRoot = firstVisible(queryAll(document, "#app, #root"));
+    if (appRoot && businessContent(appRoot)) return appRoot;
+
+    // Micro-frontends and Element-style dialogs/drawers portal the real
+    // business UI to <body>, leaving #app an empty shell. Treat a visible
+    // overlay with content as a valid root before giving up on the page.
+    var overlayRoot = firstVisible(queryAll(
+      document,
+      "[role=dialog], [role=alertdialog], .el-dialog__wrapper, .el-dialog, .el-drawer__wrapper, .el-drawer, [class*=dialog], [class*=drawer]",
+    ));
+    if (overlayRoot && businessContent(overlayRoot)) return overlayRoot;
+
+    // Last resort: body. Chrome (header/nav/aside/footer) and hidden nodes are
+    // already filtered by readableText, so a loading shell still reports blank.
+    if (document.body && businessContent(document.body)) return document.body;
+
+    return appRoot || mainRoot || overlayRoot || document.body;
   }
 
   function fingerprint(root, textLength, blocks, media, canvases) {
