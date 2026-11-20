@@ -76,6 +76,19 @@ function safeStepName(step: string): string {
 }
 
 /**
+ * 不改变 UI 的步骤：等待/休眠，以及变量读写。
+ *
+ * 这类步骤前后画面必然一致，截图只会增加报告体积；跳过采集后由 bridge
+ * 用相邻步骤的截图补齐格子，不影响报告可读性。
+ */
+function isNonVisualStep(step: string): boolean {
+  const text = String(step || '').trim();
+  if (!text) return false;
+  if (/^(等待|休眠|暂停|延时|sleep|wait|delay)/i.test(text)) return true;
+  return /^(写入|设置|赋值|存储|读取|获取|set|get|write|read).*(变量|variable)\s*$/i.test(text);
+}
+
+/**
  * 同时输出到 Cypress 控制台与用例日志缓冲。
  *
  * spec 内的 console.log 只留在浏览器控制台，不会进 Node 进程输出，因此
@@ -241,10 +254,13 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     await keveAspect.runPhase('before', ctx);
 
     // ── goal-before 截图（动作发生前的页面原始状态） ──
+    const nonVisualStep = isNonVisualStep(options.step);
     let goalScreenshotBefore = '';
-    try {
-      goalScreenshotBefore = await engine.captureArtifact(`goal-before-${order}-${safeStepName(options.step)}`);
-    } catch { /* 截图非关键路径 */ }
+    if (!nonVisualStep) {
+      try {
+        goalScreenshotBefore = await engine.captureArtifact(`goal-before-${order}-${safeStepName(options.step)}`);
+      } catch { /* 截图非关键路径 */ }
+    }
 
     let fnError: string | undefined;
     let fnErrorRaw: any;
@@ -279,9 +295,13 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
 
     // ── fn-after 截图（执行后的页面状态） ──
     let fnAfterScreenshot = '';
-    if (fn) {
+    if (fn && !nonVisualStep) {
       try {
-        fnAfterScreenshot = await engine.captureArtifact(`goal-after-fn-${order}-${safeStepName(options.step)}`);
+        // 失败现场必须保留：force 跳过去重，避免与 before 近似而丢掉证据
+        fnAfterScreenshot = await engine.captureArtifact(
+          `goal-after-fn-${order}-${safeStepName(options.step)}`,
+          { force: Boolean(fnError) },
+        );
       } catch { /* 非关键 */ }
     }
 
@@ -491,6 +511,8 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
       diagnostics: reactResult.diagnostics,
       goalScreenshotBefore: goalScreenshotBefore || undefined,
       goalScreenshotAfter: goalScreenshotAfter || undefined,
+      /** 等待/变量赋值等不改 UI 的步骤：截图由 bridge 用相邻步骤补齐 */
+      screenshotsSkipped: nonVisualStep || undefined,
       // 注意不能写成 `|| [...]`：空数组是 truthy，会把 fn-after 兜底截图短路丢弃。
       agentScreenshots: reactResult.agentScreenshots?.length
         ? reactResult.agentScreenshots

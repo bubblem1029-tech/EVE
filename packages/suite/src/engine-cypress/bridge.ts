@@ -20,6 +20,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { activeBrowserCacheDir } from '../core/browserCache.js';
 import { compareWithBaseline, createBaseline, ScreenshotDiffError } from '../core/judge/screenshotDiff.js';
+import {
+  compareShotSignatures,
+  computeShotSignature,
+  type ShotSignature,
+} from '../core/judge/shotSignature.js';
+import { backfillSkippedScreenshots } from './screenshotBackfill.js';
 import { buildConfidenceRecord, sanitizeRecord, type AttachmentLike } from '../core/judge/confidence.js';
 import { generateReportData } from '../core/generateReport/reportData.js';
 
@@ -314,9 +320,10 @@ function restoreInterruptedScreenshots(
   };
 
   const goalAttachments = attachments.filter((a) => a.name === 'keveGoalResult');
-  const goals = goalAttachments
-    .map((a) => parseJsonAttachmentBody(a.body))
-    .filter((b) => b && b.order !== undefined);
+  const pairs = goalAttachments
+    .map((att) => ({ att, body: parseJsonAttachmentBody(att.body) }))
+    .filter((pair) => pair.body && pair.body.order !== undefined);
+  const goals = pairs.map((pair) => pair.body);
 
   for (const goal of goals) {
     const order = Number(goal.order);
@@ -331,9 +338,13 @@ function restoreInterruptedScreenshots(
     if (!goal.agentScreenshots?.length && goal.goalScreenshotAfter) {
       goal.agentScreenshots = [goal.goalScreenshotAfter];
     }
-    const att = goalAttachments[goals.indexOf(goal)];
-    if (att && att.body) {
-      att.body = Buffer.from(JSON.stringify(goal)).toString('base64');
+  }
+
+  backfillSkippedScreenshots(goals);
+
+  for (const pair of pairs) {
+    if (pair.att.body) {
+      pair.att.body = Buffer.from(JSON.stringify(pair.body)).toString('base64');
     }
   }
 
@@ -480,6 +491,12 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
     taskDir: taskDirOf(),
     results: [],
   };
+  /**
+   * 截图去重的「代表图」：只保留最近一张真正落盘的签名与路径。
+   * 后续截图与代表图比较，低于阈值就直接复用它的路径，不再写盘。
+   * 用例收口（/report/test）时清空，避免跨用例复用上一张图。
+   */
+  let lastShot: { signature: ShotSignature; path: string } | null = null;
   fs.mkdirSync(state.resultDir, { recursive: true });
 
   /** 写 test-results.json → report-data.json（/report/finalize 与 after:run 共用） */
@@ -594,8 +611,33 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
         fs.mkdirSync(dir, { recursive: true });
         const name = `${safeFileSegment(payload.name)}-${Date.now()}.png`;
         const file = path.join(dir, name);
-        fs.writeFileSync(file, decodeBase64(payload.pngBase64));
-        return { ok: true, path: path.relative(state.taskDir, file) };
+        const relPath = path.relative(state.taskDir, file);
+        const png = decodeBase64(payload.pngBase64);
+
+        // 失败证据必须原样保留：force 跳过去重，保证报告里的现场截图真实存在。
+        if (payload.force !== true) {
+          try {
+            const signature = computeShotSignature(png);
+            if (lastShot) {
+              const diff = compareShotSignatures(lastShot.signature, signature);
+              if (diff.nearDuplicate) {
+                return {
+                  ok: true,
+                  path: lastShot.path,
+                  deduped: true,
+                  diffRatio: Math.round(diff.meanDiff * 100) / 100,
+                };
+              }
+            }
+            lastShot = { signature, path: relPath };
+          } catch {
+            // 解码失败（非常规 PNG）时退化为正常落盘，不影响执行
+            lastShot = null;
+          }
+        }
+
+        fs.writeFileSync(file, png);
+        return { ok: true, path: relPath, deduped: false };
       }
 
       // 截图基线：语义与 PlaywrightEngine.expectScreenshot 完全一致
@@ -647,6 +689,9 @@ export async function setupKeveBridge(on: any, config: any): Promise<any> {
        */
       case '/report/test': {
         const incoming = payload as CypressTestResultRecord;
+        // 用例收口：截图去重的代表图不跨用例复用，避免下一用例的首图
+        // 指向上一用例的截图路径（相对路径相同但语义不同）。
+        lastShot = null;
         restoreInterruptedScreenshots(incoming, state);
         const { record, log } = buildConfidenceRecord({
           title: incoming.title,

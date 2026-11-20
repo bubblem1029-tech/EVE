@@ -596,9 +596,9 @@ export class CypressEngine implements EngineAdapter {
    * 截图并落盘到 taskDir/test-artifacts/round-N/screenshots，返回相对 taskDir 的路径。
    * 与 Playwright 侧 captureScreenshot 的产物路径同形，报告可直接消费。
    */
-  async captureArtifact(name: string): Promise<string> {
+  async captureArtifact(name: string, opts?: { force?: boolean }): Promise<string> {
     const pngBase64 = await this.cdp.screenshot();
-    const resp = await this.bridge.post('/shot/save', { name, pngBase64 });
+    const resp = await this.bridge.post('/shot/save', { name, pngBase64, force: opts?.force === true });
     if (!resp?.ok) throw new Error(resp?.error || '截图落盘失败');
     return String(resp.path || '');
   }
