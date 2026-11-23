@@ -51,7 +51,20 @@ export function locatorSource(): string {
 
   function queryAll(root, css) {
     if (!root || !css) return [];
-    try { return Array.prototype.slice.call(root.querySelectorAll(css)); }
+    try {
+      // Playwright/Cypress both accept the common :visible locator semantic,
+      // while querySelectorAll only accepts standard CSS. Strip it here and
+      // apply the same visibility predicate in the shared locator runtime.
+      var visible = /:visible\b/.test(css);
+      var normalized = String(css).replace(/:visible\b/g, '');
+      var result = Array.prototype.slice.call(root.querySelectorAll(normalized));
+      if (!visible) return result;
+      return result.filter(function (el) {
+        var rect = el.getBoundingClientRect();
+        var style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      });
+    }
     catch (e) { return []; }
   }
 
