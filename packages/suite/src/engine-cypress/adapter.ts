@@ -105,6 +105,56 @@ export class CypressEngine implements EngineAdapter {
     return await this.ops<T>(`window.__keveOps.${fn}(${encoded})`);
   }
 
+  /**
+   * Cypress 的 AUT 是嵌在 runner iframe 里的，URL/readyState 完成时业务接口
+   * 仍可能留下 Element Plus loading mask。此时元素虽然已经在 DOM 中，但真实
+   * 点击会被遮罩拦截。只等待页面级阻塞层，避免把局部列表 spinner 当成全页阻塞。
+   */
+  private async waitForBlockingLoader(timeout = 20000): Promise<void> {
+    const result = await this.ops<{ ok: boolean; selector?: string }>(`(async () => {
+      const deadline = Date.now() + ${Math.max(1000, timeout)};
+      const selectors = [
+        '.el-loading-mask',
+        '[aria-busy="true"]',
+        '[role="progressbar"]',
+        '.ks-loading-mask',
+        '.ant-spin-spinning',
+      ];
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1
+          && style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity) !== 0;
+      };
+      const blocking = () => {
+        const viewport = Math.max(1, (innerWidth || 0) * (innerHeight || 0));
+        for (const selector of selectors) {
+          for (const el of document.querySelectorAll(selector)) {
+            if (!visible(el)) continue;
+            const rect = el.getBoundingClientRect();
+            const area = rect.width * rect.height;
+            const className = String(el.className || '');
+            if (area >= viewport * 0.4 || (className.includes('loading-mask') && area >= viewport * 0.2)) {
+              return selector;
+            }
+          }
+        }
+        return '';
+      };
+      for (;;) {
+        const selector = blocking();
+        if (!selector) return { ok: true };
+        if (Date.now() >= deadline) return { ok: false, selector };
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    })()`);
+    if (!result?.ok) {
+      throw new Error(`页面仍被 loading 层阻塞：${result.selector || 'unknown'}（${timeout}ms）`);
+    }
+  }
+
   /** 定位失败时给出可读错误（Playwright 是等元素超时，这里是立即失败） */
   private async withWait<T>(fn: () => Promise<T>, timeout = 10000, interval = 150): Promise<T> {
     const deadline = Date.now() + timeout;
@@ -130,6 +180,15 @@ export class CypressEngine implements EngineAdapter {
       throw new Error(`navigate: URL 非法（必须是 http/https）: ${JSON.stringify(url)}`);
     }
     await this.cdp.goto(url);
+    // 与 PlaywrightEngine.navigate 对齐：Cypress 的 CDP 导航只保证新文档
+    // 已落地，不代表 SPA 的业务内容已经渲染完成。若立即执行下一步，
+    // 大量用例会在骨架屏/空 app root 上定位元素并失败。
+    // pageReady 是软等待：纯 iframe、canvas 或没有可识别业务根节点的页面
+    // 不能因此阻断，后续步骤仍负责给出最终断言。
+    await this.ops(pageReadySource({ timeoutMs: 20000 })).catch(() => {
+      // 页面就绪探测失败不改变原有导航语义；由后续操作/断言报告真实错误。
+    });
+    await this.waitForBlockingLoader();
   }
 
   async openPage(page: DefinedPage, overrides?: Record<string, string>): Promise<void> {
@@ -212,11 +271,13 @@ export class CypressEngine implements EngineAdapter {
     // menu 等）可能被主线程长任务挤到 10s 外才出现，click 命中前的定位重试因此
     // 提前耗尽，fn 抛错掉进 Agent Re-Act 并在 120s 后被判 blocked（参见 S699
     // 线上用例排查，task-local-699-*）。这里放宽到 20s，只影响 click/dblClick。
+    await this.waitForBlockingLoader();
     await this.withWait(() => this.opsCall('click', r, false), 20000);
   }
 
   async dblClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const r = normalizeRefs(refs);
+    await this.waitForBlockingLoader();
     await this.withWait(() => this.opsCall('click', r, true), 20000);
   }
 
@@ -273,32 +334,38 @@ export class CypressEngine implements EngineAdapter {
   }
 
   /**
-   * 上传：spec 侧 fetch 文件 URL → FileReader 转 base64 → AUT 里挂到 input.files。
-   * 本文件跑在 Cypress spec 浏览器上下文，没有 node:fs，本地路径不支持——
-   * 需要 local file 的场景请用 playwright 引擎。跨域 fetch 可能被 CORS 拦，
-   * 失败时点名原因（file URL 大多允许任意来源读取，内网 CDN 需确认响应头）。
+   * 上传：HTTPS 文件由 spec 侧 fetch；本地文件经 Node Bridge 读取后转成
+   * base64，再在 AUT 中挂到 input.files。这样 Cypress 与 Playwright 都能
+   * 接受本地路径，同时不会把 node:fs 打进浏览器 bundle。
    */
   async upload(fileSource: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const source = String(fileSource || '').trim();
-    if (!source) throw new Error('engine.upload 缺少文件来源（cypress 引擎仅支持 https 文件 URL）');
-    if (!/^https?:\/\//i.test(source)) {
-      throw new Error('engine.upload cypress 引擎不支持本地路径，请使用 https 文件 URL 或改用 playwright 引擎: ' + source);
+    if (!source) throw new Error('engine.upload 缺少文件来源（HTTPS URL 或本地路径）');
+    let meta: { name: string; mime: string; base64: string };
+    if (/^https?:\/\//i.test(source)) {
+      const res = await fetch(source).catch((err) => {
+        throw new Error(`engine.upload 文件下载失败（可能是 CORS 拦截）：${source} — ${String(err?.message || err)}`);
+      });
+      if (!res.ok) throw new Error(`engine.upload 文件下载失败 HTTP ${res.status}: ${source}`);
+      const pathName = new URL(source).pathname;
+      const fallbackName = pathName.split('/').pop() || `upload-${Date.now()}.bin`;
+      const fallbackMime = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
+      const reader = new FileReader();
+      const blob = await res.blob();
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('engine.upload FileReader 读取失败'));
+        reader.readAsDataURL(blob);
+      });
+      meta = { name: fallbackName, mime: fallbackMime, base64: dataUrl.split(',')[1] || '' };
+    } else {
+      const resp = await this.bridge.post('/fs/read-binary', { file: source });
+      if (!resp?.ok || !resp.base64) {
+        throw new Error(`engine.upload 本地文件读取失败：${source} — ${resp?.error || '文件为空'}`);
+      }
+      const name = source.split(/[\\/]/).pop() || `upload-${Date.now()}.bin`;
+      meta = { name, mime: 'application/octet-stream', base64: String(resp.base64) };
     }
-    const res = await fetch(source).catch((err) => {
-      throw new Error(`engine.upload 文件下载失败（多为 CORS 拦截）：${source} — ${String(err?.message || err)}`);
-    });
-    if (!res.ok) throw new Error(`engine.upload 文件下载失败 HTTP ${res.status}: ${source}`);
-    const pathName = new URL(source).pathname;
-    const fallbackName = pathName.split('/').pop() || `upload-${Date.now()}.bin`;
-    const fallbackMime = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
-    const reader = new FileReader();
-    const blob = await res.blob();
-    const dataUrl: string = await new Promise((resolve, reject) => {
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(new Error('engine.upload FileReader 读取失败'));
-      reader.readAsDataURL(blob);
-    });
-    const meta = { name: fallbackName, mime: fallbackMime, base64: dataUrl.split(',')[1] || '' };
     const r = normalizeRefs(refs);
     await this.withWait(() => this.opsCall('upload', r, meta));
   }
@@ -348,17 +415,26 @@ export class CypressEngine implements EngineAdapter {
 
   /**
    * 截图对比：Node 侧能力，走桥。
-   * 元素级截图（refs 非空）暂按整页截图处理 —— Cypress/CDP 无法取元素级 clip 的
-   * 高保真结果（滚动容器与 transform 会错位）；调用方若有元素级需求需显式记录。
+   * 元素级截图通过 CDP 的 screenshotClip 实现。clip 坐标由 AUT 内部
+   * getBoundingClientRect 提供，CDP 层负责叠加 Cypress AUT iframe 偏移。
    */
   async expectScreenshot(key: string, opts: ExpectScreenshotOptions = {}, ...refs: (ElementRef | ElementEntry)[]): Promise<CyShotDiffResult> {
-    if (refs.length > 0) {
-      console.warn(`[engine.expectScreenshot] Cypress 下元素级截图按整页处理：${key}`);
-    }
     const owned = !isGoalShotDiffCaptureActive();
     if (owned) beginGoalShotDiffCapture();
     try {
-      const pngBase64 = await this.cdp.screenshot();
+      let pngBase64: string;
+      if (refs.length > 0) {
+        const r = normalizeRefs(refs);
+        const rect = await this.ops<{ x: number; y: number; width: number; height: number }>(
+          `window.__keveOps.rect(${JSON.stringify(r)})`,
+        );
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+          throw new Error(`截图目标不可见或尺寸无效：${key}`);
+        }
+        pngBase64 = await this.cdp.screenshotClip(rect);
+      } else {
+        pngBase64 = await this.cdp.screenshot();
+      }
       const resp = await this.bridge.post('/shot/compare', {
         key,
         pngBase64,
@@ -431,7 +507,8 @@ export class CypressEngine implements EngineAdapter {
     const r = normalizeRefs(refs);
     await this.withWait(async () => {
       const actual = await this.opsCall<string>('text', r);
-      if (actual !== String(expected).replace(/\s+/g, ' ').trim()) {
+      const normalizeText = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (normalizeText(actual) !== normalizeText(expected)) {
         throw new Error(`断言失败：元素文本应等于「${expected}」，实际显示「${actual}」而非预期`);
       }
     });
@@ -441,7 +518,8 @@ export class CypressEngine implements EngineAdapter {
     const r = normalizeRefs(refs);
     await this.withWait(async () => {
       const actual = await this.opsCall<string>('text', r);
-      if (actual === String(expected).replace(/\s+/g, ' ').trim()) {
+      const normalizeText = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (normalizeText(actual) === normalizeText(expected)) {
         throw new Error(`断言失败：元素文本不应等于「${expected}」，实际为「${actual}」`);
       }
     });

@@ -177,7 +177,22 @@ export class PlaywrightEngine implements EngineAdapter {
    * visible=true；全部不可见时仍走 Playwright 默认等待超时，不会假绿。
    */
   private resolveInteractive(refs: (ElementRef | ElementEntry)[]): Locator {
-    return this.resolve(refs).locator('visible=true');
+    const scoped = this.resolve(refs).locator('visible=true');
+    const lastRef = refs[refs.length - 1] as ElementRef | undefined;
+    const hops = lastRef?.chain || [];
+    const textHop = [...hops].reverse().find((hop) => {
+      const type = String(hop?.type || '');
+      return type === 'includes' || type === 'text';
+    });
+    if (!textHop || !String(textHop.value || '').trim()) return scoped;
+
+    // 部分组件（Element Plus 等）把下拉菜单挂到 body/portal，
+    // 此时链上的父容器并不是菜单的 DOM 父节点。保留原链路优先，
+    // 再补一个页面级文本回退，使 Playwright 与 Cypress 的文本定位一致。
+    const globalText = this.page
+      .getByText(String(textHop.value).trim(), { exact: false })
+      .locator('visible=true');
+    return typeof scoped.or === 'function' ? scoped.or(globalText) : scoped;
   }
 
   async click(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
@@ -333,7 +348,12 @@ export class PlaywrightEngine implements EngineAdapter {
 
   async hover(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolveInteractive(refs);
-    await locator.first().hover();
+    const target = locator.first();
+    await target.scrollIntoViewIfNeeded();
+    await target.hover({ force: false });
+    // 菜单类组件通常在 mouseenter 后通过下一帧/动画创建 portal 节点。
+    // 给 DOM 一个短暂稳定窗口，避免紧接着的子步骤在菜单挂载前定位。
+    await this.page.waitForTimeout(300);
   }
 
   async text(...refs: (ElementRef | ElementEntry)[]): Promise<string> {
