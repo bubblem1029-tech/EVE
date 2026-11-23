@@ -54,6 +54,11 @@ export { run, KeveRunError, type RunOptions, type RunResult } from './commands/r
 // ─── Code-based Element Management (P0) ──────────────────────────────
 export { definePage, type ElementRef, type ElementFactory, type ElementEntry, type ElementRegistry, type PageDefinition, type DefinedPage, type WaitForReady, isElementFactory, getElement } from './core/page-object/definePage.js';
 export { resolveElement, resolveChain, resolveFromPage } from './core/page-object/elementResolver.js';
+export { createLocatorPlan, detectPortalKind, planFromRef, planToElementRef, scopeForChild, type LocatorPlan, type LocatorScope, type LocatorHopPlan, type PortalKind } from './core/locator-plan.js';
+export { isComponentStrategyPlan, type ComponentStrategy, type ComponentStrategyPlan, type ComponentStrategyRuntime } from './core/component-strategy.js';
+export { ComponentStrategyRegistry } from './core/component-strategy-registry.js';
+export { createComponentStrategyPlan, componentPlanFromRefs } from './core/component-plan.js';
+export { CypressComponentRuntime, createCypressComponentOps, type CypressComponentOps } from './engine-cypress/componentRuntime.js';
 export { PlaywrightEngine, createEngine, type EngineAdapter } from './engine-playwright/engineAdapter.js';
 export { toDecorator, generateDecoratorSpec, type ToDecoratorOptions, type DslStep, type DslExpectation } from './dsl/index.js';
 

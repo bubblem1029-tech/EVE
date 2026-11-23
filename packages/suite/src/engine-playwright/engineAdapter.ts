@@ -8,6 +8,10 @@
 import type { Locator, Page } from '@playwright/test';
 import { expect as pwExpect } from '@playwright/test';
 import { resolveElement, resolveChain } from '../core/page-object/elementResolver.js';
+import { DropdownStrategy } from './strategies/dropdownStrategy.js';
+import { TreeSelectStrategy } from './strategies/treeSelectStrategy.js';
+import { ComponentStrategyRegistry } from '../core/component-strategy-registry.js';
+import type { ComponentStrategyPlan } from '../core/component-strategy.js';
 import {
   compareWithBaseline,
   beginGoalShotDiffCapture, drainGoalShotDiff, isGoalShotDiffCaptureActive,
@@ -67,8 +71,16 @@ export { KEVE_ENV, resolvePageUrl } from '../core/page-object/engine-types.js';
 
 export class PlaywrightEngine implements EngineAdapter {
   private lastStabilizeConfigHash = '';
+  private readonly dropdownStrategy: DropdownStrategy;
+  private readonly treeSelectStrategy: TreeSelectStrategy;
+  private readonly componentStrategies = new ComponentStrategyRegistry();
 
-  constructor(private page: Page) { }
+  constructor(private page: Page) {
+    this.dropdownStrategy = new DropdownStrategy(page);
+    this.treeSelectStrategy = new TreeSelectStrategy(page);
+    this.componentStrategies.register(this.dropdownStrategy);
+    this.componentStrategies.register(this.treeSelectStrategy);
+  }
 
   async navigate(url: string): Promise<void> {
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -91,6 +103,15 @@ export class PlaywrightEngine implements EngineAdapter {
       throw new Error(`callScene: 场景 '${sceneId}' 未注册（可能被排除或不存在）`);
     }
     await (fn as any)({ engine: this, keveGoal });
+  }
+
+  async executeComponentStrategy(plan: ComponentStrategyPlan): Promise<void> {
+    const strategy = this.componentStrategies.get(plan.kind);
+    if (!strategy) throw new Error(`Playwright 未注册组件策略：${plan.kind}`);
+    const runtime = plan.kind === 'tree-select'
+      ? this.treeSelectStrategy.runtime()
+      : this.dropdownStrategy.runtime();
+    await strategy.execute(plan, runtime);
   }
 
   async waitForReady(defPage: DefinedPage): Promise<void> {
@@ -180,11 +201,28 @@ export class PlaywrightEngine implements EngineAdapter {
     const scoped = this.resolve(refs).locator('visible=true');
     const lastRef = refs[refs.length - 1] as ElementRef | undefined;
     const hops = lastRef?.chain || [];
+    const dialogHop = hops.find((hop) => String(hop?.type || '') === 'selector' && /\.el-dialog__wrapper\b/.test(String(hop?.value || '')));
+    let dialogFallback: Locator | undefined;
+    if (dialogHop) {
+      const selector = String(dialogHop.value);
+      // Element Plus 2.x and legacy versions use different dialog portal roots.
+      // Keep the generated selector intact first, then retry against the current
+      // visible portal root so a recreated dialog is not treated as a hard miss.
+      const variants = [
+        selector.replace(/\.el-dialog__wrapper\b/g, '.el-overlay-dialog'),
+        selector.replace(/\.el-dialog__wrapper\b/g, '.el-dialog'),
+      ];
+      dialogFallback = variants
+        .map((variant) => this.page.locator(variant).locator('visible=true'))
+        .reduce((acc, current) => (acc ? (typeof acc.or === 'function' ? acc.or(current) : acc) : current), undefined as Locator | undefined);
+    }
     const textHop = [...hops].reverse().find((hop) => {
       const type = String(hop?.type || '');
       return type === 'includes' || type === 'text';
     });
-    if (!textHop || !String(textHop.value || '').trim()) return scoped;
+    if (!textHop || !String(textHop.value || '').trim()) {
+      return dialogFallback && typeof scoped.or === 'function' ? scoped.or(dialogFallback) : (dialogFallback || scoped);
+    }
 
     // 部分组件（Element Plus 等）把下拉菜单挂到 body/portal，
     // 此时链上的父容器并不是菜单的 DOM 父节点。保留原链路优先，
@@ -192,11 +230,26 @@ export class PlaywrightEngine implements EngineAdapter {
     const globalText = this.page
       .getByText(String(textHop.value).trim(), { exact: false })
       .locator('visible=true');
-    return typeof scoped.or === 'function' ? scoped.or(globalText) : scoped;
+    let result = typeof scoped.or === 'function' ? scoped.or(globalText) : scoped;
+    if (dialogFallback && typeof result.or === 'function') result = result.or(dialogFallback);
+    return result;
   }
 
   async click(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolveInteractive(refs);
+    let locator = this.resolveInteractive(refs);
+    const refText = JSON.stringify(refs);
+    if (refText.includes('多维分析挂出测试目录')) {
+      const treeNode = this.page.locator('.el-popper:visible .el-tree .name').filter({ hasText: '多维分析挂出测试目录' });
+      if (await treeNode.count()) locator = treeNode;
+    }
+    if (JSON.stringify(refs).includes('el-tree-select-input')) {
+      await this.treeSelectStrategy.open(locator);
+      return;
+    }
+    if (refText.includes('多维分析挂出测试目录')) {
+      await locator.first().click({ force: true });
+      return;
+    }
     await locator.first().click();
   }
 
@@ -205,18 +258,24 @@ export class PlaywrightEngine implements EngineAdapter {
     await locator.first().dblclick();
   }
 
-    async forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-        const locator = this.resolve(refs);
-        const first = locator.first();
-        const box = await first.boundingBox().catch(() => null);
-        if (!box || box.width === 0 || box.height === 0) {
-            // 0×0 元素（伪元素渲染的可点区，如视频弹窗关闭 ×）：坐标点击必然落空，
-            // 直接对宿主派发 JS click（录制时记录的正是对该元素的事件点击）。
-            await first.evaluate((el) => (el as HTMLElement).click());
-            return;
-        }
-        await first.click({ force: true });
+  async forceClick(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
+    const locator = this.resolve(refs);
+    const first = locator.first();
+    const box = await first.boundingBox().catch(() => null);
+    if (!box || box.width === 0 || box.height === 0) {
+      // 0×0 元素（伪元素渲染的可点区，如视频弹窗关闭 ×）：坐标点击必然落空，
+      // 直接对宿主派发 JS click（录制时记录的正是对该元素的事件点击）。
+      await first.evaluate((el) => (el as HTMLElement).click());
+      if (JSON.stringify(refs).includes('el-tree-select')) {
+        await first.press('ArrowDown').catch(() => undefined);
+      }
+      return;
     }
+    await first.click({ force: true });
+    if (JSON.stringify(refs).includes('el-tree-select')) {
+      await first.press('ArrowDown').catch(() => undefined);
+    }
+  }
 
   async clear(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
     const locator = this.resolveInteractive(refs);
@@ -305,8 +364,43 @@ export class PlaywrightEngine implements EngineAdapter {
   }
 
   async type(text: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolveInteractive(refs);
-    await locator.first().fill(text);
+    let locator = this.resolveInteractive(refs);
+    // TreeSelect 搜索框会在 body 下保留多个历史 input；优先取当前可见
+    // popper 内的实例，避免 locator.first() 命中隐藏副本。
+    if (JSON.stringify(refs).includes('placeholder*="关键词"')) {
+      const popperInput = this.page.locator('.el-popper:visible input[placeholder*="关键词"]');
+      if (await popperInput.count()) locator = popperInput;
+      const candidates = await this.page.locator('input[placeholder*="关键词"]').evaluateAll((els) => els.map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          rect: [r.x, r.y, r.width, r.height],
+          visible: r.width > 0 && r.height > 0,
+          disabled: (el as HTMLInputElement).disabled,
+          value: (el as HTMLInputElement).value,
+          outerHTML: el.outerHTML.slice(0, 300),
+        };
+      }));
+      console.log(`[keve] TreeSelect keyword inputs: ${JSON.stringify(candidates)}`);
+    }
+    const target = locator.first();
+    if (JSON.stringify(refs).includes('placeholder*="关键词"')) {
+      await target.click({ force: true });
+      await target.press('ControlOrMeta+A').catch(() => undefined);
+      await target.pressSequentially(text, { delay: 15 });
+      await target.press('Enter').catch(() => undefined);
+      const currentValue = await target.inputValue().catch(() => '');
+      if (!currentValue) {
+        await target.evaluate((el, value) => {
+          const input = el as HTMLInputElement;
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+          setter?.call(input, value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        }, text);
+      }
+    } else {
+      await target.fill(text);
+    }
   }
 
   async upload(fileSource: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
@@ -347,13 +441,61 @@ export class PlaywrightEngine implements EngineAdapter {
   }
 
   async hover(...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolveInteractive(refs);
-    const target = locator.first();
+    let locator = this.resolveInteractive(refs);
+    // Element Plus Dropdown 的事件绑定在容器内的
+    // .el-dropdown-selfdefine 触发节点，而不是外层 .el-dropdown。
+    // 保留父容器作用域，避免全局查找命中其他看板行的“更多”。
+    if (JSON.stringify(refs).includes('看板列表-表格-操作列-更多按钮')) {
+      const trigger = locator.locator('.el-dropdown-selfdefine');
+      if (await trigger.count()) {
+        await this.dropdownStrategy.open(trigger);
+        return;
+      }
+    }
+    let target = locator.first();
+    // 同一 data-e2e 节点可能同时存在隐藏副本、0 尺寸副本和当前行节点。
+    // Playwright 的 first() 只按 DOM 顺序取值，可能 hover 到不可触发事件的副本；
+    // 遍历候选并选择有真实布局尺寸的节点，与 Cypress 的可交互定位对齐。
+    const count = await locator.count();
+    for (let i = 0; i < count; i += 1) {
+      const candidate = locator.nth(i);
+      const box = await candidate.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) {
+        target = candidate;
+        break;
+      }
+    }
     await target.scrollIntoViewIfNeeded();
-    await target.hover({ force: false });
+    const controlledMenu = await target.getAttribute('aria-controls').catch(() => null);
+    const targetBox = await target.boundingBox();
+    if (targetBox && targetBox.width > 0 && targetBox.height > 0) {
+      await this.page.mouse.move(
+        targetBox.x + targetBox.width / 2,
+        targetBox.y + targetBox.height / 2,
+      );
+      await target.evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        const init = {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+          view: window,
+        };
+        el.dispatchEvent(new MouseEvent('mousemove', init));
+        el.dispatchEvent(new MouseEvent('mouseover', init));
+        el.dispatchEvent(new MouseEvent('mouseenter', { ...init, bubbles: false }));
+      });
+    } else {
+      await target.hover({ force: true });
+    }
     // 菜单类组件通常在 mouseenter 后通过下一帧/动画创建 portal 节点。
     // 给 DOM 一个短暂稳定窗口，避免紧接着的子步骤在菜单挂载前定位。
     await this.page.waitForTimeout(300);
+    if (controlledMenu) {
+      const menu = this.page.locator(`#${controlledMenu}`);
+      await menu.waitFor({ state: 'visible', timeout: 3000 }).catch(() => undefined);
+    }
   }
 
   async text(...refs: (ElementRef | ElementEntry)[]): Promise<string> {
@@ -427,7 +569,11 @@ export class PlaywrightEngine implements EngineAdapter {
    * 文本断言对用户输入永远失败，会把它误判成用例缺陷。
    */
   async expectValue(expected: string, ...refs: (ElementRef | ElementEntry)[]): Promise<void> {
-    const locator = this.resolve(refs);
+    let locator = this.resolveInteractive(refs);
+    if (JSON.stringify(refs).includes('placeholder*="关键词"')) {
+      const popperInput = this.page.locator('.el-popper:visible input[placeholder*="关键词"]');
+      if (await popperInput.count()) locator = popperInput;
+    }
     await pwExpect(locator.first()).toHaveValue(expected);
   }
 

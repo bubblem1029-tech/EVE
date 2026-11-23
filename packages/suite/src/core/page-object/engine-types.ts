@@ -13,6 +13,7 @@ import type { ElementRef, ElementEntry, DefinedPage } from './definePage.js';
 import type { ExpectScreenshotOptions, ShotDiffResult } from '../judge/screenshotDiff.js';
 import type { PageReadyOptions, PageReadyResult } from '../../dsl/pageReadySource.js';
 import type { StabilizePageOptions, StabilizePageResult } from './stabilizePage.js';
+import type { ComponentStrategyPlan } from '../component-strategy.js';
 
 /** waitForResponse 选项：就绪门语义（软等待 = 超时不阻塞，与 waitForReady.api 一致） */
 export interface WaitForResponseOptions {
@@ -39,6 +40,8 @@ export interface WaitForResponseResult {
 }
 
 export interface EngineAdapter {
+  /** 执行跨引擎组件策略；未声明组件策略的历史用例继续走普通算子。 */
+  executeComponentStrategy?(plan: ComponentStrategyPlan): Promise<void>;
   /** 导航到 URL */
   navigate(url: string): Promise<void>;
   /** 打开 PageObject 页面入口：按 KEVE_ENV 解析四环境 URL 并填充 ${param} 占位（overrides 优先于 page.url.params） */

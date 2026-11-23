@@ -25,6 +25,7 @@ import {
   isTextOnlyAssert,
   parseComparison,
 } from './ops.js';
+import { detectPortalKind, scopeForChild } from '../core/locator-plan.js';
 
 // ─── 输入 / 输出类型 ──────────────────────────────────────────────────
 
@@ -123,11 +124,16 @@ export function toDecorator(options: ToDecoratorOptions): string {
   L(`// 源: stepGroup ${stepGroupId}「${caseName}」→ @kkeve/suite 装饰器投影`);
   L(`// 环境: ${env} / 账号: ${account ? account.name : '无'} / SSO 注入: ${options.ssoInject ? '开' : '关'}`);
   L(`import { keveModel, keveScene } from '${options.importFrom || '@kkeve/suite/keve-test'}';`);
+  L(`import { componentPlanFromRefs } from '${options.importFrom || '@kkeve/suite/keve-test'}';`);
   L('');
   L(`// 平台定位链透传：context 多跳 → ElementRef.chain`);
-  L(`const C = (...hops: any[]) => ({`);
-  L(`  chain: hops.filter(h => h && String(h.type || '') !== '' && String(h?.value ?? '') !== '')`);
-  L(`});`);
+  L(`const C = (...hops: any[]) => {`);
+  L(`  const meta = hops.find(h => h && h.__locatorMeta);`);
+  L(`  return {`);
+  L(`    chain: hops.filter(h => h && !h.__locatorMeta && String(h.type || '') !== '' && String(h?.value ?? '') !== ''),`);
+  L(`    ...(meta ? { scope: meta.scope, portalKind: meta.portalKind, interaction: meta.interaction } : {}),`);
+  L(`  };`);
+  L(`};`);
   L('');
   L(`@keveModel('M_SG${stepGroupId}', ${q(caseName)})`);
   L(`export class Model_SG${stepGroupId} {`);
@@ -390,12 +396,22 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
         // 子动作只记录了行内元素的相对定位（如 input[placeholder=...]），
         // 但父步骤在 iframe 里时，子动作必须继承父链的 iframe 上下文；
         // 否则会到主文档里找行内控件，永远落空。
+        const childContext = Array.isArray(childAction?.context) ? childAction.context : [];
+        const isPortalChild = scopeForChild(childContext) === 'portal';
+        const portalKind = isPortalChild ? detectPortalKind(childContext) : undefined;
         const childHops = chainExprOrNull(
-          inheritFrameHops(childAction?.context, d.context),
+          isPortalChild ? childContext : inheritFrameHops(childContext, d.context),
           ctx,
+          isPortalChild ? { scope: 'portal', portalKind, interaction: childOp === 'CLICK_ELEMENT' ? 'click' : undefined } : undefined,
         );
         if (!childHops) continue;
-        if (childOp === 'CLICK_ELEMENT') childActions.push(`await engine.click(${childHops});`);
+        if (childOp === 'CLICK_ELEMENT') {
+          if (isPortalChild && portalKind) {
+            childActions.push(`if (engine.executeComponentStrategy) await engine.executeComponentStrategy(componentPlanFromRefs(${q(portalKind)}, ${chain}, ${childHops})); else { await engine.hover(${chain}); await engine.click(${childHops}); }`);
+          } else {
+            childActions.push(`await engine.click(${childHops});`);
+          }
+        }
         else if (childOp === 'FORCE_CLICK_ELEMENT') childActions.push(`await engine.forceClick(${childHops});`);
         else if (childOp === 'INPUT_ELEMENT') {
           const childVal = resolveValue(childAction?.value, ctx);
@@ -1276,10 +1292,11 @@ function chainExpr(context: DslHop[] | undefined, ctx: RenderCtx): string {
 }
 
 /** 同 chainExpr，但无有效跳时返回 ''（截图对比：无上下文 = 整页截图） */
-function chainExprOrNull(context: DslHop[] | undefined, ctx: RenderCtx): string {
+function chainExprOrNull(context: DslHop[] | undefined, ctx: RenderCtx, metadata?: { scope?: string; portalKind?: string; interaction?: string }): string {
   const hops = collectHops(context);
   if (!hops.length) return '';
-  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${stringExpr(h.value, ctx, `定位链 ${h.type}`)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')})`;
+  const meta = metadata ? `, { __locatorMeta: true, scope: ${q(metadata.scope || '')}, portalKind: ${q(metadata.portalKind || '')}, interaction: ${q(metadata.interaction || '')} }` : '';
+  return `C(${hops.map(h => `{ type: ${q(h.type)}, value: ${stringExpr(h.value, ctx, `定位链 ${h.type}`)}${h.index !== undefined ? `, index: ${h.index}` : ''} }`).join(', ')}${meta})`;
 }
 
 /**

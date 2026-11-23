@@ -8,6 +8,7 @@
 import type { Locator, Page, FrameLocator } from '@playwright/test';
 import type { ElementRef, ElementEntry, ElementFactory, DefinedPage, ElementHop } from './definePage.js';
 import { isElementFactory } from './definePage.js';
+import { detectPortalKind } from '../locator-plan.js';
 
 // ─── Platform Hop Resolution (keve-wiki chain) ────────────────────────
 
@@ -238,6 +239,12 @@ export function resolveChain(page: Page, ...refs: (ElementRef | ElementEntry)[])
     const childRef = elements[i];
     // 平台多跳定位链：在当前范围内继续 hop 解析
     if (childRef.chain && childRef.chain.length > 0) {
+      // Dropdown/Dialog/TreeSelect 内容由组件挂到 document.body，
+      // 不是触发器的真实 DOM 子节点；portal 子链必须切换到 document scope。
+      if (detectPortalKind(childRef.chain)) {
+        locator = resolveElement(page, childRef);
+        continue;
+      }
       locator = applyHops(page, locator, childRef.chain);
       continue;
     }

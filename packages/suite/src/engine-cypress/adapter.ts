@@ -11,6 +11,9 @@
 
 import type { ElementRef, ElementEntry, DefinedPage } from '../core/page-object/definePage.js';
 import { isElementFactory } from '../core/page-object/definePage.js';
+import { ComponentStrategyRegistry } from '../core/component-strategy-registry.js';
+import { CypressComponentRuntime, CypressPortalStrategy } from './componentRuntime.js';
+import type { ComponentStrategyPlan } from '../core/component-strategy.js';
 import type { EngineAdapter, WaitForResponseOptions, WaitForResponseResult } from '../core/page-object/engine-types.js';
 import { resolvePageUrl, KEVE_ENV } from '../core/page-object/engine-types.js';
 import type { ExpectScreenshotOptions } from '../core/judge/screenshotDiff.js';
@@ -76,8 +79,43 @@ function escapeRegExp(s: string): string {
 
 export class CypressEngine implements EngineAdapter {
   private lastStabilizeConfigHash = '';
+  private readonly componentStrategies: ComponentStrategyRegistry<ElementRef>;
 
-  constructor(private cdp: Cdp, private bridge: Bridge) { }
+  constructor(private cdp: Cdp, private bridge: Bridge) {
+    const runtime = new CypressComponentRuntime({
+      hover: (ref) => this.hover(ref),
+      click: (ref) => this.click(ref),
+      waitForElement: async (selector, timeout = 5000) => this.waitForVisibleSelector(selector, timeout),
+    });
+    this.componentStrategies = new ComponentStrategyRegistry<ElementRef>()
+      .register(new CypressPortalStrategy('dropdown', runtime))
+      .register(new CypressPortalStrategy('tree-select', runtime))
+      .register(new CypressPortalStrategy('dialog', runtime))
+      .register(new CypressPortalStrategy('date-picker', runtime));
+  }
+
+  private async waitForVisibleSelector(selector: string, timeout: number): Promise<{ found: boolean }> {
+    return this.ops<{ found: boolean }>(`(async () => {
+      const deadline = Date.now() + ${Math.max(100, timeout)};
+      while (Date.now() < deadline) {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (el && el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0) return { found: true };
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return { found: false };
+    })()`);
+  }
+
+  /** 执行显式声明的跨引擎组件策略；普通定位链仍走原生 click/hover。 */
+  async executeComponentStrategy(plan: ComponentStrategyPlan): Promise<void> {
+    const strategy = this.componentStrategies.get(plan.kind);
+    if (!strategy) throw new Error(`Cypress 未注册组件策略：${plan.kind}`);
+    await strategy.execute(plan, new CypressComponentRuntime({
+      hover: (ref) => this.hover(ref),
+      click: (ref) => this.click(ref),
+      waitForElement: (selector, timeout = 5000) => this.waitForVisibleSelector(selector, timeout),
+    }));
+  }
 
   // ── AUT 上下文准备 ────────────────────────────────────────────────
 

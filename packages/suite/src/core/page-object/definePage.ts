@@ -36,6 +36,12 @@ export interface ElementHop {
 }
 
 export interface ElementRef {
+  /** 定位作用域：普通元素默认 parent/document；portal 元素显式声明 portal。 */
+  scope?: 'document' | 'parent' | 'row' | 'portal' | 'iframe';
+  /** portal 组件类型，供 Cypress/Playwright 共享同一打开与等待策略。 */
+  portalKind?: 'dropdown' | 'dialog' | 'tree-select' | 'date-picker';
+  /** 交互意图，供 resolver 选择 click/hover/input 的可交互策略。 */
+  interaction?: 'click' | 'hover' | 'input' | 'assert';
   /** ARIA role 语义定位（优先） */
   role?: string;
   /** 可访问名称（配合 role 使用） */

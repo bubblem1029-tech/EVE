@@ -61,3 +61,8 @@ export { createCypressEngine, resolveBaseUrl } from './host.js';
 // ── 宿主已安装（副作用），此处保持与 Playwright 侧一致的导入体验 ──
 export { getKeveHost, setKeveHost, hasKeveHost } from '../core/decorator/keve-host.js';
 export type { KeveHost, KeveTestInfo } from '../core/decorator/keve-host.js';
+
+// ── 组件策略计划（与 Playwright 入口保持同构） ──
+// DSL 转译后的组件操作直接从 engine-cypress 导入该方法；不能只在
+// keve-test 暴露，否则同一份 DSL 在 Cypress 中会在执行前报导出错误。
+export { createComponentStrategyPlan, componentPlanFromRefs } from '../core/component-plan.js';
