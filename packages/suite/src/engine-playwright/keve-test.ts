@@ -223,6 +223,7 @@ export const test = base.extend<KeveFixture>({
       let fnErrorRaw: any; // 原始错误对象（ScreenshotDiffError 等带结构的错误需要保留结构）
       let fnResult: any; // fn 返回值透传（flow 产物，如 createDashboard 的看板名）
       let fnBlocked: boolean = false; // true when fn error is environment-blocked (skip agent Re-Act)
+      let recoveredFromFnError = false;
       // 截图对比：fn 前开缓冲、fn 后收集 —— engine.expectScreenshot 的结果经此进 attachment
       beginGoalShotDiffCapture();
       if (fn) {
@@ -348,39 +349,39 @@ export const test = base.extend<KeveFixture>({
             conclusion: 'pass' as const,
           };
         } else {
-        try {
-          reactResult = await reactLoop(
-            page,
-            options.step,
-            options.expected,
-            {
-              learnedActionsHint: learnedHint,
-              specFilePath: ctx.specFilePath,
-              fnSource,
-              fnResult: fnError ? { error: fnError } : { success: true },
-              clickTarget: options.clickTarget,
-              goalScreenshotBefore: goalScreenshotBefore || undefined,
-              fnAfterScreenshot: fnAfterScreenshot || undefined,
-              targetUrl: process.env.KEVE_TARGET_URL || '',
-              getEnv: (name: string) => process.env[name] || '',
-              saveScreenshot: saveAgentScreenshot,
-              loadInitialImages: loadInitialImages,
-              llm: reactLlmConfig(),
-            },
-          );
-        } catch (reactErr: any) {
-          console.log(`[keveGoal] reactLoop interrupted: ${(reactErr?.message || String(reactErr)).slice(0, 200)}`);
-          reactResult = {
-            expectedMet: false,
-            actions: [],
-            finalSnapshot: '',
-            agentScreenshots: [],
-            conclusion: 'fail',
-            diagnostics: undefined,
-          };
-        }
+          try {
+            reactResult = await reactLoop(
+              page,
+              options.step,
+              options.expected,
+              {
+                learnedActionsHint: learnedHint,
+                specFilePath: ctx.specFilePath,
+                fnSource,
+                fnResult: fnError ? { error: fnError } : { success: true },
+                clickTarget: options.clickTarget,
+                goalScreenshotBefore: goalScreenshotBefore || undefined,
+                fnAfterScreenshot: fnAfterScreenshot || undefined,
+                targetUrl: process.env.KEVE_TARGET_URL || '',
+                getEnv: (name: string) => process.env[name] || '',
+                saveScreenshot: saveAgentScreenshot,
+                loadInitialImages: loadInitialImages,
+                llm: reactLlmConfig(),
+              },
+            );
+          } catch (reactErr: any) {
+            console.log(`[keveGoal] reactLoop interrupted: ${(reactErr?.message || String(reactErr)).slice(0, 200)}`);
+            reactResult = {
+              expectedMet: false,
+              actions: [],
+              finalSnapshot: '',
+              agentScreenshots: [],
+              conclusion: 'fail',
+              diagnostics: undefined,
+            };
+          }
         } // end of page-alive else (agent Re-Act path)
-        } // end of else (non-blocked path)
+      } // end of else (non-blocked path)
 
       // ── Deterministic override: fn assertion failure cannot be overridden by Agent "pass" ──
       // When fn has a hard assertion failure (Expected X, Received Y), the value mismatch
@@ -411,15 +412,16 @@ export const test = base.extend<KeveFixture>({
               : (fnError && isAssertionFailure(fnError) && !fnBlocked)
                 ? new Error(`Assertion failed: ${fnError}`)
                 : new Error(
-                    // fn 错误（如含 actual 的文本断言失败）不能被吞掉，否则报告只剩期望、丢掉实际值
-                    `Expected not achieved: ${options.expected}${fnErrorRaw ? ` — ${String(fnErrorRaw.message || fnErrorRaw).slice(0, 400)}` : ''}`,
-                  ),
+                  // fn 错误（如含 actual 的文本断言失败）不能被吞掉，否则报告只剩期望、丢掉实际值
+                  `Expected not achieved: ${options.expected}${fnErrorRaw ? ` — ${String(fnErrorRaw.message || fnErrorRaw).slice(0, 400)}` : ''}`,
+                ),
       } as any;
       // Attach Agent conclusion for downstream consumers
       if (reactResult.conclusion) (result as any).conclusion = reactResult.conclusion;
       // Attach runtime diagnostics for downstream consumers (Playwright side must
       // copy them here because the attachment reads from `result`).
       if (reactResult.diagnostics) (result as any).diagnostics = reactResult.diagnostics;
+      recoveredFromFnError = Boolean(fnError && !fnBlocked && reactResult.expectedMet);
       console.log(reactResult.expectedMet
         ? `[keveGoal] ✅ "${options.step}" PASSED`
         : `[keveGoal] ❌ "${options.step}" FAILED (${reactResult.conclusion || 'fail'}) — ${result.error?.message || 'expected not achieved'}`);
@@ -513,6 +515,9 @@ export const test = base.extend<KeveFixture>({
           screenshotDiff: shotDiffs.length ? shotDiffs : undefined,
           // refinePatch: (result as any).refinePatch || undefined, // 已注释：scriptRefine 已禁用
           conclusion: (result as any).conclusion || undefined,
+          // fn 选择器失败但 Agent 已经完成目标时，给上游一个明确的
+          // "可恢复失败" 信号，避免把中间 BLOCKED 当成最终结论。
+          recoveredFromFnError: recoveredFromFnError || undefined,
         }), 'utf-8'),
       });
 

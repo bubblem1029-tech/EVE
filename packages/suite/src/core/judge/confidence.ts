@@ -48,6 +48,8 @@ export interface StepResultAttachment {
   goalScreenshotBefore?: string;
   goalScreenshotAfter?: string;
   agentScreenshots?: string[];
+  /** fn 曾失败，但 Agent 已通过真实页面证据完成目标 */
+  recoveredFromFnError?: boolean;
 }
 
 /** 供分类使用的错误摘要（Error 实例跨引擎不可序列化，统一降级成 name+message） */

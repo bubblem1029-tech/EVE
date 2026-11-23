@@ -415,6 +415,7 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
     }
 
     const conclusion = reactResult.expectedMet ? 'pass' : (reactResult.conclusion || 'fail');
+    const recoveredFromFnError = Boolean(fnError && !fnBlocked && reactResult.expectedMet);
     const success = reactResult.expectedMet;
 
     // 失败归因必须自带上下文：只报「哪一步 / 为什么」其中的一半，都要回查报告
@@ -519,6 +520,7 @@ export function createCyKeveGoal(engine: CypressEngine): CyKeveGoal {
         : (fnAfterScreenshot ? [fnAfterScreenshot] : []),
       screenshotDiff: shotDiffs.length ? shotDiffs : undefined,
       conclusion,
+      recoveredFromFnError: recoveredFromFnError || undefined,
     };
 
     addAttachment({
