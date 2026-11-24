@@ -220,8 +220,21 @@ export class PlaywrightEngine implements EngineAdapter {
       const type = String(hop?.type || '');
       return type === 'includes' || type === 'text';
     });
+    const isScopedDropdown = hops.some((hop) =>
+      String(hop?.type || '') === 'selector' && /\.el-select-dropdown\b/.test(String(hop?.value || '')),
+    );
     if (!textHop || !String(textHop.value || '').trim()) {
       return dialogFallback && typeof scoped.or === 'function' ? scoped.or(dialogFallback) : (dialogFallback || scoped);
+    }
+    // Element Plus 下拉项挂在 body portal 中。此类链路已经显式限定了
+    // 可见下拉面板，不能再追加全页面文本回退，否则会把目标重新扩展到
+    // 其它历史下拉实例。
+    if (isScopedDropdown) {
+      // Element Plus 的选项统一复用 data-e2e-name，按属性或全局 first()
+      // 容易命中仍挂在 body 上的旧面板。锁定当前可见面板后，用精确文本
+      // 定位真实选项节点，保持语义定位，不依赖坐标。
+      const menu = this.page.locator('.el-select-dropdown:visible').last();
+      return menu.getByText(String(textHop.value).trim(), { exact: true }).last();
     }
 
     // 部分组件（Element Plus 等）把下拉菜单挂到 body/portal，

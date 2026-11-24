@@ -475,6 +475,12 @@ function renderStep(d: DslStep, ctx: RenderCtx): string[] {
       }
       break;
     }
+    case 'JAVASCRIPT': {
+      const expr = resolveValue(d.value, ctx) || (typeof d.child === 'string' ? d.child : d.child?.value);
+      if (!expr) throw new Error(`JAVASCRIPT 缺少表达式: ${stepText}`);
+      emit([`await engine.evaluate(${q(String(expr))});`, ...waitExprs(d)]);
+      break;
+    }
     case 'WRITE_GLOBAL': {
       // 真实数据里表达式写在 context 的 javascript 跳上，value 只是变量名
       const jsHop = firstHopOfType(d.context, 'javascript');
