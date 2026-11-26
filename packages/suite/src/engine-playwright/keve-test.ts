@@ -163,6 +163,9 @@ export const test = base.extend<KeveFixture>({
     const context = await browser.newContext({
       storageState,
       ...(viewport ? { viewport } : {}),
+      ...(process.env.KEVE_SSO_USER_AGENT
+        ? { userAgent: process.env.KEVE_SSO_USER_AGENT }
+        : {}),
       ...(videoOn ? { recordVideo: { dir: typeof videoOpt === 'object' && videoOpt.dir ? videoOpt.dir : undefined } } : {}),
     });
     const page = await context.newPage();

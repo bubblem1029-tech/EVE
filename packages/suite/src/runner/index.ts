@@ -80,6 +80,7 @@ export interface BuildExecEnvOptions {
     targetUrl?: string;
     baselineDir?: string;
     ssoCookiesJson?: string;
+    ssoUserAgent?: string;
     identitySsoCookies?: Record<string, string>;
     llm?: { baseUrl?: string; model?: string; apiKey?: string };
   };
@@ -131,6 +132,7 @@ export function buildExecEnv({
       || path.join(os.homedir(), '.keve', 'baselines'),
     // 任务入参优先，环境变量仅作为本地调试兜底，避免父进程残留登录态覆盖任务账号。
     KEVE_SSO_COOKIES: input.ssoCookiesJson || process.env.KEVE_SSO_COOKIES || '[]',
+    KEVE_SSO_USER_AGENT: input.ssoUserAgent || process.env.KEVE_SSO_USER_AGENT || '',
     KEVE_IDENTITY_SSO_COOKIES: JSON.stringify(input.identitySsoCookies || {})
       || process.env.KEVE_IDENTITY_SSO_COOKIES
       || '{}',

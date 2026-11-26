@@ -19,6 +19,7 @@ const targetUrl = process.env.KEVE_TARGET_URL || '';
 export default {
   viewportWidth: 2560,
   viewportHeight: 1440,
+  userAgent: process.env.KEVE_SSO_USER_AGENT || null,
   e2e: {
     ...(targetUrl ? { baseUrl: targetUrl } : {}),
     specPattern: 'specs/**/*.spec.ts',
